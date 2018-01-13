@@ -335,7 +335,7 @@ parseJavaExpr cb cls meth estr = parseParts eparts
                           "(zero-based) local variable index " ++ show i ++
                           " for parameter " ++ show n ++ " doesn't exist"
                     Just lv -> return $ CC.Term $ Local s i $ localType lv
-                Nothing -> fail $ "bad Java expression syntax: " ++ s
+                Nothing -> throwE $ "bad Java expression syntax: " ++ s
             _ | hasDebugInfo meth -> do
                   let mlv = lookupLocalVariableByName meth 0 s
                   case mlv of

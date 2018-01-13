@@ -79,6 +79,7 @@ import Cryptol.Utils.Logger (quietLogger)
 import SAWScript.TypedTerm
 import SAWScript.Utils (Pos(..))
 import SAWScript.AST (Located(getVal, locatedPos), Import(..))
+import SAWScript.Exceptions
 
 --------------------------------------------------------------------------------
 
@@ -160,7 +161,9 @@ ioParseGeneric parse lstr = ioParseResult (parse cfg (pack str))
 ioParseResult :: Either P.ParseError a -> IO a
 ioParseResult res = case res of
   Right a -> return a
-  Left e  -> fail $ "Cryptol parse error:\n" ++ show (P.ppError e) -- X.throwIO (ParseError e)
+  Left e  -> failRuntimeIO $
+               "Cryptol parse error:\n" ++
+               show (P.ppError e) -- X.throwIO (ParseError e)
 
 -- Rename ----------------------------------------------------------------------
 
@@ -253,9 +256,10 @@ genTermEnv sc modEnv = do
 checkNotParametrized :: T.Module -> IO ()
 checkNotParametrized m =
   when (T.isParametrizedModule m) $
-    fail $ unlines [ "Cannot load parameterized modules directly."
-                   , "Either use a ` import, or make a module instantiation."
-                   ]
+    failRuntimeIO $
+      unlines [ "Cannot load parameterized modules directly."
+              , "Either use a ` import, or make a module instantiation."
+              ]
 
 
 loadCryptolModule :: SharedContext -> CryptolEnv -> FilePath
@@ -297,7 +301,7 @@ bindCryptolModule (modName, CryptolModule sm tm) env =
 lookupCryptolModule :: CryptolModule -> String -> IO TypedTerm
 lookupCryptolModule (CryptolModule _ tm) name =
   case Map.lookup (packIdent name) (Map.mapKeys MN.nameIdent tm) of
-    Nothing -> fail $ "Binding not found: " ++ name
+    Nothing -> failRuntimeIO $ "Binding not found: " ++ name
     Just t -> return t
 
 --------------------------------------------------------------------------------
@@ -517,4 +521,5 @@ moduleCmdResult (res, ws) = do
   mapM_ (print . pp) ws
   case res of
     Right (a, me) -> return (a, me)
-    Left err      -> fail $ "Cryptol error:\n" ++ show (pp err) -- X.throwIO (ModuleSystemError err)
+    Left err      -> failRuntimeIO $
+                       "Cryptol error:\n" ++ show (pp err) -- X.throwIO (ModuleSystemError err)

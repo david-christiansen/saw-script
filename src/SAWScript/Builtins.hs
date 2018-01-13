@@ -80,6 +80,7 @@ import SAWScript.ImportAIG
 
 import SAWScript.AST (getVal, pShow, Located(..))
 import SAWScript.Options as Opts
+import SAWScript.Exceptions (failRuntimeIO)
 import SAWScript.Proof
 import SAWScript.SolverStats
 import SAWScript.TopLevel
@@ -210,16 +211,16 @@ cecPrim x y = do
     ABC.Invalid bs
       | Just fv <- readFiniteValue (FTVec (fromIntegral (length bs)) FTBit) bs ->
            return $ SV.InvalidMulti stats [("x", toFirstOrderValue fv)]
-      | otherwise -> fail "cec: impossible, could not parse counterexample"
-    ABC.VerifyUnknown -> fail "cec: unknown result "
+      | otherwise -> failRuntimeIO "cec: impossible, could not parse counterexample"
+    ABC.VerifyUnknown -> failRuntimeIO "cec: unknown result "
 
 loadAIGPrim :: FilePath -> TopLevel AIGNetwork
 loadAIGPrim f = do
   exists <- io $ doesFileExist f
-  unless exists $ fail $ "AIG file " ++ f ++ " not found."
+  unless exists $ failRuntimeIO $ "AIG file " ++ f ++ " not found."
   et <- io $ loadAIG f
   case et of
-    Left err -> fail $ "Reading AIG failed: " ++ err
+    Left err -> failRuntimeIO $ "Reading AIG failed: " ++ err
     Right ntk -> return ntk
 
 saveAIGPrim :: String -> AIGNetwork -> TopLevel ()
@@ -230,7 +231,7 @@ saveAIGasCNFPrim f (AIG.Network be ls) =
   case ls of
     [l] -> do _ <- io $ GIA.writeCNF be l f
               return ()
-    _ -> fail "save_aig_as_cnf: non-boolean term"
+    _ -> failRuntimeIO "save_aig_as_cnf: non-boolean term"
 
 -- | Tranlsate a SAWCore term into an AIG
 bitblastPrim :: SharedContext -> Term -> IO AIGNetwork
@@ -240,7 +241,7 @@ bitblastPrim sc t = do
   let s = ttSchema t'
   case s of
     C.Forall [] [] _ -> return ()
-    _ -> fail $ "Attempting to bitblast a term with a polymorphic type: " ++ pretty s
+    _ -> failRuntimeIO $ "Attempting to bitblast a term with a polymorphic type: " ++ pretty s
 -}
   BBSim.withBitBlastedTerm sawProxy sc bitblastPrimitives t' $ \be ls -> do
     return (AIG.Network be (toList ls))
@@ -252,11 +253,11 @@ readAIGPrim :: FilePath -> TopLevel TypedTerm
 readAIGPrim f = do
   sc <- getSharedContext
   exists <- io $ doesFileExist f
-  unless exists $ fail $ "AIG file " ++ f ++ " not found."
+  unless exists $ failRuntimeIO $ "AIG file " ++ f ++ " not found."
   opts <- getOptions
   et <- io $ readAIG opts sc f
   case et of
-    Left err -> fail $ "Reading AIG failed: " ++ err
+    Left err -> failRuntimeIO $ "Reading AIG failed: " ++ err
     Right t -> io $ mkTypedTerm sc t
 
 replacePrim :: TypedTerm -> TypedTerm -> TypedTerm -> TopLevel TypedTerm
@@ -269,17 +270,17 @@ replacePrim pat replace t = do
   let fvpat = looseVars tpat
   let fvrepl = looseVars trepl
 
-  unless (fvpat == 0) $ fail $ unlines
+  unless (fvpat == 0) $ failRuntimeIO $ unlines
     [ "pattern term is not closed", show tpat ]
 
-  unless (fvrepl == 0) $ fail $ unlines
+  unless (fvrepl == 0) $ failRuntimeIO $ unlines
     [ "replacement term is not closed", show trepl ]
 
   io $ do
     ty1 <- scTypeOf sc tpat
     ty2 <- scTypeOf sc trepl
     c <- scConvertible sc False ty1 ty2
-    unless c $ fail $ unlines
+    unless c $ failRuntimeIO $ unlines
       [ "terms do not have convertible types", show tpat, show ty1, show trepl, show ty2 ]
 
   let ss = emptySimpset
@@ -289,7 +290,7 @@ replacePrim pat replace t = do
     ty  <- scTypeOf sc (ttTerm t)
     ty' <- scTypeOf sc t'
     c' <- scConvertible sc False ty ty'
-    unless c' $ fail $ unlines
+    unless c' $ failRuntimeIO $ unlines
       [ "term does not have the same type after replacement", show ty, show ty' ]
 
   return t{ ttTerm = t' }
@@ -304,7 +305,7 @@ hoistIfsPrim t = do
     ty  <- scTypeOf sc (ttTerm t)
     ty' <- scTypeOf sc t'
     c' <- scConvertible sc False ty ty'
-    unless c' $ fail $ unlines
+    unless c' $ failRuntimeIO $ unlines
       [ "term does not have the same type after hoisting ifs", show ty, show ty' ]
 
   return t{ ttTerm = t' }
@@ -344,8 +345,8 @@ writeSAIGInferLatches sc file tt = do
   let numLatches = sizeFiniteType s
   writeSAIG sc file (ttTerm tt) numLatches
   where
-    die :: Monad m => String -> m a
-    die why = fail $
+    die :: MonadIO m => String -> m a
+    die why = failRuntimeIO $
       "writeSAIGInferLatches: " ++ why ++ ":\n" ++
       "term must have type of the form '(i, s) -> (o, s)',\n" ++
       "where 'i', 's', and 'o' are all fixed-width types,\n" ++
@@ -387,7 +388,7 @@ writeCNF sc f t = do
     [l] -> do
       _ <- GIA.writeCNF be l f
       return ()
-    _ -> fail "writeCNF: non-boolean term"
+    _ -> failRuntimeIO "writeCNF: non-boolean term"
 
 write_cnf :: SharedContext -> FilePath -> TypedTerm -> IO ()
 write_cnf sc f (TypedTerm schema t) = do
@@ -425,7 +426,7 @@ withFirstGoal :: (ProofGoal -> TopLevel (a, SolverStats, Maybe ProofGoal)) -> Pr
 withFirstGoal f =
   StateT $ \(ProofState goals concl stats) ->
   case goals of
-    [] -> fail "ProofScript failed: no subgoal"
+    [] -> failRuntimeIO "ProofScript failed: no subgoal"
     g : gs -> do
       (x, stats', mg') <- f g
       case mg' of
@@ -451,7 +452,7 @@ quickcheckGoal sc n = do
             return (SV.Unsat stats, stats, Nothing)
           -- TODO: use reasonable names here
           Just cex -> return (SV.SatMulti stats (zip (repeat "_") (map toFirstOrderValue cex)), stats, Just goal)
-      Nothing -> fail $ "quickcheck:\n" ++
+      Nothing -> failRuntimeIO $ "quickcheck:\n" ++
         "term has non-testable type"
 
 assumeValid :: ProofScript SV.ProofResult
@@ -476,18 +477,18 @@ trivial = withFirstGoal $ \goal -> do
       case unwrapTermF t of
         Lambda _ _ t' -> checkTrue t'
         FTermF (CtorApp "Prelude.True" []) -> return ()
-        _ -> fail "trivial: not a trivial goal"
+        _ -> failRuntimeIO "trivial: not a trivial goal"
 
 split_goal :: ProofScript ()
 split_goal =
   StateT $ \(ProofState goals concl stats) ->
   case goals of
-    [] -> fail "ProofScript failed: no subgoal"
-    (ProofGoal Existential _ _ _ _) : _ -> fail "not a universally-quantified goal"
+    [] -> failRuntimeIO "ProofScript failed: no subgoal"
+    (ProofGoal Existential _ _ _ _) : _ -> failRuntimeIO "not a universally-quantified goal"
     (ProofGoal Universal num ty name prop) : gs ->
       let (vars, body) = asLambdaList prop in
       case (isGlobalDef "Prelude.and" <@> return <@> return) body of
-        Nothing -> fail "split_goal: goal not of form 'Prelude.and _ _'"
+        Nothing -> failRuntimeIO "split_goal: goal not of form 'Prelude.and _ _'"
         Just (_ :*: p1 :*: p2) ->
           do sc <- getSharedContext
              t1 <- io $ scLambdaList sc vars p1
@@ -605,18 +606,18 @@ checkBoolean :: SharedContext -> Term -> IO ()
 checkBoolean sc t = do
   ty <- scTypeCheckError sc t
   unless (returnsBool ty) $
-    fail $ "Invalid non-boolean type: " ++ show ty
+    failRuntimeIO $ "Invalid non-boolean type: " ++ show ty
 
 checkBooleanType :: C.Type -> IO ()
 checkBooleanType (C.tIsBit -> True) = return ()
 checkBooleanType (C.tIsFun -> Just (_, ty')) = checkBooleanType ty'
 checkBooleanType ty =
-  fail $ "Invalid non-boolean type: " ++ pretty ty
+  failRuntimeIO $ "Invalid non-boolean type: " ++ pretty ty
 
 checkBooleanSchema :: C.Schema -> IO ()
 checkBooleanSchema (C.Forall [] [] t) = checkBooleanType t
 checkBooleanSchema s =
-  fail $ "Invalid polymorphic type: " ++ pretty s
+  failRuntimeIO $ "Invalid polymorphic type: " ++ pretty s
 
 -- | Bit-blast a @Term@ representing a theorem and check its
 -- satisfiability using ABC.
@@ -643,15 +644,15 @@ satABC sc = withFirstGoal $ \g -> io $ do
     AIG.Sat cex -> do
       let r = liftCexBB shapes cex
       case r of
-        Left err -> fail $ "Can't parse counterexample: " ++ err
+        Left err -> failRuntimeIO $ "Can't parse counterexample: " ++ err
         Right vs
           | length argNames == length vs -> do
             let r' = SV.SatMulti stats (zip argNames (map toFirstOrderValue vs))
             case goalQuant g of
               Existential -> return (r', stats, Nothing)
               Universal -> return (r', stats, Just (g { goalTerm = ft }))
-          | otherwise -> fail $ unwords ["ABC SAT results do not match expected arguments", show argNames, show vs]
-    AIG.SatUnknown -> fail "Unknown result from ABC"
+          | otherwise -> failRuntimeIO $ unwords ["ABC SAT results do not match expected arguments", show argNames, show vs]
+    AIG.SatUnknown -> failRuntimeIO "Unknown result from ABC"
 
 parseDimacsSolution :: [Int]    -- ^ The list of CNF variables to return
                     -> [String] -- ^ The value lines from the solver
@@ -697,19 +698,19 @@ satExternal doCNF sc execName args = withFirstGoal $ \g -> io $ do
       let bs = parseDimacsSolution vars vls
       let r = liftCexBB shapes bs
       case r of
-        Left msg -> fail $ "Can't parse counterexample: " ++ msg
+        Left msg -> failRuntimeIO $ "Can't parse counterexample: " ++ msg
         Right vs
           | length argNames == length vs -> do
             let r' = SV.SatMulti stats (zip argNames (map toFirstOrderValue vs))
             case goalQuant g of
               Universal -> return (r', stats, Just (g { goalTerm = ft }))
               Existential -> return (r', stats, Nothing)
-          | otherwise -> fail $ unwords ["external SAT results do not match expected arguments", show argNames, show vs]
+          | otherwise -> failRuntimeIO $ unwords ["external SAT results do not match expected arguments", show argNames, show vs]
     (["s UNSATISFIABLE"], []) ->
       case goalQuant g of
         Universal -> return (SV.Unsat stats, stats, Nothing)
         Existential -> return (SV.Unsat stats, stats, Just (g { goalTerm = ft }))
-    _ -> fail $ "Unexpected result from SAT solver:\n" ++ out
+    _ -> failRuntimeIO $ "Unexpected result from SAT solver:\n" ++ out
 
 writeAIGWithMapping :: GIA.GIA s -> GIA.Lit s -> FilePath -> IO [Int]
 writeAIGWithMapping be l path = do
@@ -754,14 +755,14 @@ satRME sc = withFirstGoal $ \g -> io $ do
       let bs = map (maybe False id . flip Map.lookup m) $ take n [0..]
       let r = liftCexBB shapes bs
       case r of
-        Left err -> fail $ "Can't parse counterexample: " ++ err
+        Left err -> failRuntimeIO $ "Can't parse counterexample: " ++ err
         Right vs
           | length argNames == length vs -> do
             let r' = SV.SatMulti stats (zip argNames (map toFirstOrderValue vs))
             case goalQuant g of
               Existential -> return (r', stats, Nothing)
               Universal -> return (r', stats, Just g)
-          | otherwise -> fail $ unwords ["RME SAT results do not match expected arguments", show argNames, show vs]
+          | otherwise -> failRuntimeIO $ unwords ["RME SAT results do not match expected arguments", show argNames, show vs]
 
 codegenSBV :: SharedContext -> FilePath -> [String] -> String -> TypedTerm -> IO ()
 codegenSBV sc path unints fname (TypedTerm _schema t) =
@@ -807,14 +808,14 @@ satUnintSBV conf sc unints = withFirstGoal $ \g -> io $ do
       case goalQuant g of
         Existential -> return (r', stats, Nothing)
         Universal -> return (r', stats, Just (g { goalTerm = ft }))
-    SBV.SatExtField {} -> fail "Prover returned model in extension field"
+    SBV.SatExtField {} -> failRuntimeIO "Prover returned model in extension field"
     SBV.Unsatisfiable {} -> do
       ft <- scApplyPrelude_False sc
       case goalQuant g of
         Existential -> return (SV.Unsat stats, stats, Just (g { goalTerm = ft }))
         Universal -> return (SV.Unsat stats, stats, Nothing)
-    SBV.Unknown {} -> fail "Prover returned Unknown"
-    SBV.ProofError _ ls -> fail . unlines $ "Prover returned error: " : ls
+    SBV.Unknown {} -> failRuntimeIO "Prover returned Unknown"
+    SBV.ProofError _ ls -> failRuntimeIO . unlines $ "Prover returned error: " : ls
 
 getLabels :: SolverStats -> [SBVSim.Labeler] -> Map.Map String SBV.CW -> [String] -> SV.SatResult
 getLabels stats ls d argNames =
@@ -888,7 +889,7 @@ satWithExporter exporter sc path ext = withFirstGoal $ \g -> io $ do
            let (ts, tf) = asPiList ty
            tf' <- scWhnf sc tf
            case asBoolType tf' of
-             Nothing -> fail $ "Invalid non-boolean type: " ++ show ty
+             Nothing -> failRuntimeIO $ "Invalid non-boolean type: " ++ show ty
              Just () -> return ()
            negTerm (map snd ts) t0
   exporter sc ((path ++ "." ++ goalType g ++ show (goalNum g)) ++ ext) t
@@ -952,7 +953,7 @@ provePrintPrim script t = do
   case finishProof pstate of
     (_,Just thm) -> do printOutLnTop Info "Valid"
                        return thm
-    (_,Nothing) -> fail $ "prove: " ++ show (length (psGoals pstate)) ++ " unsolved subgoal(s)\n"
+    (_,Nothing) -> failRuntimeIO $ "prove: " ++ show (length (psGoals pstate)) ++ " unsolved subgoal(s)\n"
                      ++ SV.showsProofResult opts (SV.flipSatResult r) ""
 
 satPrim :: ProofScript SV.SatResult -> TypedTerm
@@ -983,7 +984,7 @@ quickCheckPrintPrim opts sc numTests tt = do
         Just counterExample -> printOutLn opts OnlyCounterExamples $
           "----------Counterexample----------\n" ++
           showList counterExample ""
-    Nothing -> fail $ "quickCheckPrintPrim:\n" ++
+    Nothing -> failRuntimeIO $ "quickCheckPrintPrim:\n" ++
       "term has non-testable type:\n" ++
       pretty (ttSchema tt)
 
@@ -1022,7 +1023,7 @@ addPreludeDefs names ss = do
           getDef sc n =
             case findDef (scModule sc) (qualify n) of
               Just d -> return d
-              Nothing -> fail $ "Prelude definition " ++ n ++ " not found"
+              Nothing -> failRuntimeIO $ "Prelude definition " ++ n ++ " not found"
 
 rewritePrim :: Simpset -> TypedTerm -> TopLevel TypedTerm
 rewritePrim ss (TypedTerm schema t) = do
@@ -1079,7 +1080,7 @@ freshSymbolicPrim x schema@(C.Forall [] [] ct) = do
   tm <- io $ scFreshGlobal sc x cty
   return $ TypedTerm schema tm
 freshSymbolicPrim _ _ =
-  fail "Can't create fresh symbolic variable of non-ground type."
+  failRuntimeIO "Can't create fresh symbolic variable of non-ground type."
 
 abstractSymbolicPrim :: TypedTerm -> TopLevel TypedTerm
 abstractSymbolicPrim (TypedTerm _ t) = do
@@ -1104,11 +1105,11 @@ lambdas vars (TypedTerm schema0 term0) = do
     checkMono schema =
       case schema of
         C.Forall [] [] t -> return t
-        _ -> fail "lambda: cannot abstract over polymorphic variable"
+        _ -> failRuntimeIO "lambda: cannot abstract over polymorphic variable"
     checkVar (TypedTerm schema term) = do
       e <- case asExtCns term of
              Just e -> return e
-             Nothing -> fail "lambda: argument not a symbolic variable"
+             Nothing -> failRuntimeIO "lambda: argument not a symbolic variable"
       t <- checkMono schema
       return (e, t)
 
@@ -1210,16 +1211,16 @@ failsPrim m = TopLevel $ do
       do liftIO $ putStrLn "== Anticipated failure message =="
          liftIO $ print ex
     Right _ ->
-      do liftIO $ fail "Expected failure, but succeeded instead!"
+      do liftIO $ failRuntimeIO "Expected failure, but succeeded instead!"
 
 eval_bool :: TypedTerm -> TopLevel Bool
 eval_bool t = do
   sc <- getSharedContext
   case ttSchema t of
     C.Forall [] [] (C.tIsBit -> True) -> return ()
-    _ -> fail "eval_bool: not type Bit"
+    _ -> failRuntimeIO "eval_bool: not type Bit"
   unless (null (getAllExts (ttTerm t))) $
-    fail "eval_bool: term contains symbolic variables"
+    failRuntimeIO "eval_bool: term contains symbolic variables"
   v <- io $ rethrowEvalError $ return $ SV.evaluateTypedTerm sc t
   return (C.fromVBit v)
 
@@ -1229,12 +1230,12 @@ eval_int t = do
   cenv <- fmap rwCryptol getTopLevelRW
   let cfg = C.meSolverConfig (CEnv.eModuleEnv cenv)
   unless (null (getAllExts (ttTerm t))) $
-    fail "term contains symbolic variables"
+    failRuntimeIO "term contains symbolic variables"
   opts <- getOptions
   t' <- io $ defaultTypedTerm opts sc cfg t
   case ttSchema t' of
     C.Forall [] [] (isInteger -> True) -> return ()
-    _ -> fail "eval_int: argument is not a finite bitvector"
+    _ -> failRuntimeIO "eval_int: argument is not a finite bitvector"
   v <- io $ rethrowEvalError $ return $ SV.evaluateTypedTerm sc t'
   io $ C.runEval SV.quietEvalOpts (C.fromWord "eval_int" v)
 
@@ -1274,21 +1275,21 @@ eval_size s =
     C.Forall [] [] t ->
       case C.evalType mempty t of
         Left (C.Nat x) -> return x
-        Left C.Inf     -> fail "eval_size: illegal infinite size"
-        Right _        -> fail "eval_size: not a numeric type"
-    _ -> fail "eval_size: unsupported polymorphic type"
+        Left C.Inf     -> failRuntimeIO "eval_size: illegal infinite size"
+        Right _        -> failRuntimeIO "eval_size: not a numeric type"
+    _ -> failRuntimeIO "eval_size: unsupported polymorphic type"
 
 nthPrim :: [a] -> Int -> TopLevel a
-nthPrim [] _ = fail "nth: index too large"
+nthPrim [] _ = failRuntimeIO "nth: index too large"
 nthPrim (x : _) 0 = return x
 nthPrim (_ : xs) i = nthPrim xs (i - 1)
 
 headPrim :: [a] -> TopLevel a
-headPrim [] = fail "head: empty list"
+headPrim [] = failRuntimeIO "head: empty list"
 headPrim (x : _) = return x
 
 tailPrim :: [a] -> TopLevel [a]
-tailPrim [] = fail "tail: empty list"
+tailPrim [] = failRuntimeIO "tail: empty list"
 tailPrim (_ : xs) = return xs
 
 parseCore :: String -> TopLevel Term
@@ -1298,11 +1299,11 @@ parseCore input = do
       path = "<interactive>"
   let (uterm, errs) = parseSAWTerm base path (B.fromString input)
   mapM_ (printOutLnTop Opts.Error . show) errs
-  unless (null errs) $ fail $ show errs
+  unless (null errs) $ failRuntimeIO $ show errs
   let imps = [ UntypedAST.Import False (Position.PosPair pos (mkModuleName ["Prelude"])) Nothing Nothing ]
       pos = Position.Pos base path 0 0
   (t, _tp) <- case Verifier.SAW.Typechecker.checkTerm [preludeModule] imps uterm of
-    Left err -> fail (show err)
+    Left err -> failRuntimeIO (show err)
     Right x -> return x
   io $ scSharedTerm sc t
 
@@ -1320,7 +1321,7 @@ prove_core script input = do
   opts <- rwPPOpts <$> getTopLevelRW
   case finishProof pstate of
     (_,Just thm) -> return thm
-    (_,Nothing)  -> fail $ "prove_core: " ++ show (length (psGoals pstate)) ++ " unsolved subgoal(s)\n"
+    (_,Nothing)  -> failRuntimeIO $ "prove_core: " ++ show (length (psGoals pstate)) ++ " unsolved subgoal(s)\n"
                       ++ SV.showsProofResult opts r ""
 
 core_axiom :: String -> TopLevel Theorem

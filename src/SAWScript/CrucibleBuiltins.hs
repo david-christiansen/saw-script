@@ -105,6 +105,7 @@ import Verifier.SAW.TypedAST
 import Verifier.SAW.Recognizer
 
 import SAWScript.Builtins
+import SAWScript.Exceptions
 import SAWScript.Options
 import SAWScript.Proof
 import SAWScript.SolverStats
@@ -150,7 +151,7 @@ crucible_llvm_verify bic opts lm nm lemmas checkSat setup tactic =
      let nm' = fromString nm
      let llmod = cc^.ccLLVMModule
      def <- case find (\d -> L.defName d == nm') (L.modDefines llmod) of
-                    Nothing -> fail ("Could not find function named" ++ show nm)
+                    Nothing -> failRuntimeIO ("Could not find function named" ++ show nm)
                     Just decl -> return decl
      let st0 = initialCrucibleSetupState cc def
      -- execute commands of the method spec
@@ -158,7 +159,7 @@ crucible_llvm_verify bic opts lm nm lemmas checkSat setup tactic =
      let globals = cc^.ccGlobals
      let mvar = Crucible.llvmMemVar (cc^.ccLLVMContext)
      mem0 <- case Crucible.lookupGlobal mvar globals of
-       Nothing -> fail "internal error: LLVM Memory global not found"
+       Nothing -> failRuntimeIO "internal error: LLVM Memory global not found"
        Just mem0 -> return mem0
      let globals1 = Crucible.llvmGlobals (cc^.ccLLVMContext) mem0
      -- construct the initial state for verifications
@@ -190,7 +191,7 @@ crucible_llvm_unsafe_assume_spec bic opts lm nm setup =
     let llmod = cc^.ccLLVMModule
     st0 <- case initialCrucibleSetupState cc     <$> find (\d -> L.defName d == nm') (L.modDefines  llmod) <|>
                 initialCrucibleSetupStateDecl cc <$> find (\d -> L.decName d == nm') (L.modDeclares llmod) of
-                   Nothing -> fail ("Could not find function named" ++ show nm)
+                   Nothing -> failRuntimeIO ("Could not find function named" ++ show nm)
                    Just st0 -> return st0
     (view csMethodSpec) <$> execStateT (runCrucibleSetupM setup) st0
 
@@ -219,7 +220,7 @@ verifyObligations cc mspec tactic assumes asserts = do
         printOutLnTop Info (show stats)
         printOutLnTop OnlyCounterExamples "----------Counterexample----------"
         mapM_ (printOutLnTop OnlyCounterExamples . show) vals
-        io $ fail "Proof failed." -- Mirroring behavior of llvm_verify
+        io $ failRuntimeIO "Proof failed." -- Mirroring behavior of llvm_verify
   printOutLnTop Info $ unwords ["Proof succeeded!", nm]
   return (mconcat stats)
 
@@ -284,7 +285,7 @@ resolveArguments cc mspec env = mapM resolveArg [0..(nArgs-1)]
          st' <- Crucible.toStorableType mt'
          let L.Symbol nm = mspec^.csName
          unless (st == st') $
-           fail $ unlines [ "Type mismatch in argument " ++ show i ++ " when veriyfing " ++ show nm
+           failRuntimeIO $ unlines [ "Type mismatch in argument " ++ show i ++ " when veriyfing " ++ show nm
                           , "Argument is declared with type: " ++ show mt
                           , "but provided argument has incompatible type: " ++ show mt'
                           ]
@@ -296,7 +297,7 @@ resolveArguments cc mspec env = mapM resolveArg [0..(nArgs-1)]
           checkArgTy i mt mt'
           v <- resolveSetupVal cc env tyenv sv
           return (mt, v)
-        Nothing -> fail $ unwords ["Argument", show i, "unspecified"]
+        Nothing -> failRuntimeIO $ unwords ["Argument", show i, "unspecified"]
 
 --------------------------------------------------------------------------------
 
@@ -323,7 +324,7 @@ setupPrePointsTos mspec cc env pts mem0 = foldM go mem0 pts
            Crucible.LLVMValInt blk off
              | Just Crucible.Refl <- Crucible.testEquality (Crucible.bvWidth off) Crucible.PtrWidth
              -> return (Crucible.LLVMPointer blk off)
-           _ -> fail "Non-pointer value found in points-to assertion"
+           _ -> failRuntimeIO "Non-pointer value found in points-to assertion"
          -- In case the types are different (from crucible_points_to_untyped)
          -- then the store type should be determined by the rhs.
          memTy <- typeOfSetupValue cc tyenv val
@@ -425,7 +426,7 @@ registerOverride opts cc _ctx cs = do
             (Crucible.handleName h)
             retType
             (methodSpecHandler opts sc cc cs retType)
-    Nothing -> fail $ "Can't find declaration for `" ++ fsym ++ "`."
+    Nothing -> failRuntimeIO $ "Can't find declaration for `" ++ fsym ++ "`."
 
 --------------------------------------------------------------------------------
 
@@ -443,7 +444,7 @@ verifySimulate ::
 verifySimulate opts cc mspec args assumes lemmas globals checkSat =
   do let nm = mspec^.csName
      case Map.lookup nm (Crucible.cfgMap (cc^.ccLLVMModuleTrans)) of
-       Nothing -> fail $ unwords ["function", show nm, "not found"]
+       Nothing -> failRuntimeIO $ unwords ["function", show nm, "not found"]
        Just (Crucible.AnyCFG cfg) ->
          do let h   = Crucible.cfgHandle cfg
                 rty = Crucible.handleReturnType h
@@ -487,7 +488,7 @@ verifySimulate opts cc mspec args assumes lemmas globals checkSat =
 
               Crucible.AbortedResult _ ar ->
                 do let resultDoc = ppAbortedResult cc ar
-                   fail $ unlines [ "Symbolic execution failed."
+                   failRuntimeIO $ unlines [ "Symbolic execution failed."
                                   , show resultDoc
                                   ]
 
@@ -537,7 +538,7 @@ verifyPoststate opts sc cc mspec env0 globals ret =
               learnCond opts sc cc mspec PostState (mspec ^. csPostState)
 
      st <- case matchPost of
-             Left err      -> fail (show err)
+             Left err      -> failRuntimeIO (show err)
              Right (_, st) -> return st
      for_ (view osAsserts st) $ \(p, r) ->
        Crucible.sbAddAssertion sym p r
@@ -550,7 +551,7 @@ verifyPoststate opts sc cc mspec env0 globals ret =
     sym = cc^.ccBackend
 
     verifyObligation (_, (Crucible.Assertion _ _ Nothing)) =
-      fail "Found an assumption in final proof obligation list"
+      failRuntimeIO "Found an assumption in final proof obligation list"
     verifyObligation (hyps, (Crucible.Assertion _ concl (Just err))) = do
       hypTerm    <- scAndList sc =<< mapM (Crucible.toSC sym) hyps
       conclTerm  <- Crucible.toSC sym concl
@@ -559,8 +560,8 @@ verifyPoststate opts sc cc mspec env0 globals ret =
 
     matchResult =
       case (ret, mspec ^. csRetValue) of
-        (Nothing     , Just _ )     -> fail "verifyPoststate: unexpected crucible_return specification"
-        (Just _      , Nothing)     -> fail "verifyPoststate: missing crucible_return specification"
+        (Nothing     , Just _ )     -> failRuntimeIO "verifyPoststate: unexpected crucible_return specification"
+        (Just _      , Nothing)     -> failRuntimeIO "verifyPoststate: missing crucible_return specification"
         (Nothing     , Nothing)     -> return ()
         (Just (rty,r), Just expect) -> matchArg sc cc PostState r rty expect
 
@@ -607,7 +608,7 @@ setupCrucibleContext bic opts (LLVMModule _ llvm_mod) action = do
           case res of
             Crucible.FinishedExecution st (Crucible.TotalRes gp) -> return (gp^.Crucible.gpGlobals, st)
             Crucible.FinishedExecution st (Crucible.PartialRes _ gp _) -> return (gp^.Crucible.gpGlobals, st)
-            Crucible.AbortedResult _ _ -> fail "Memory initialization failed!"
+            Crucible.AbortedResult _ _ -> failRuntimeIO "Memory initialization failed!"
       return
          CrucibleContext{ _ccLLVMModuleTrans = mtrans
                         , _ccLLVMModule = llvm_mod
@@ -639,7 +640,7 @@ setupArg sc sym ecRef tp =
        return (Crucible.RegEntry tp elt)
 
     Crucible.NotBaseType ->
-      fail $ unwords ["Crucible extraction currently only supports Crucible base types", show tp]
+      failRuntimeIO $ unwords ["Crucible extraction currently only supports Crucible base types", show tp]
 
 setupArgs :: SharedContext
           -> Sym
@@ -674,13 +675,13 @@ extractFromCFG opts sc cc (Crucible.AnyCFG cfg) =
             t <- Crucible.asSymExpr
                        (gp^.Crucible.gpValue)
                        (Crucible.toSC sym)
-                       (fail $ unwords ["Unexpected return type:", show (Crucible.regType (gp^.Crucible.gpValue))])
+                       (failRuntimeIO $ unwords ["Unexpected return type:", show (Crucible.regType (gp^.Crucible.gpValue))])
             t' <- scAbstractExts sc (toList ecs) t
             tt <- mkTypedTerm sc t'
             return tt
         Crucible.AbortedResult _ ar -> do
           let resultDoc = ppAbortedResult cc ar
-          fail $ unlines [ "Symbolic execution failed."
+          failRuntimeIO $ unlines [ "Symbolic execution failed."
                          , show resultDoc
                          ]
     
@@ -690,14 +691,14 @@ extract_crucible_llvm :: BuiltinContext -> Options -> LLVMModule -> String -> To
 extract_crucible_llvm bic opts lm fn_name =
   setupCrucibleContext bic opts lm $ \cc ->
     case Map.lookup (fromString fn_name) (Crucible.cfgMap (cc^.ccLLVMModuleTrans)) of
-      Nothing  -> fail $ unwords ["function", fn_name, "not found"]
+      Nothing  -> failRuntimeIO $ unwords ["function", fn_name, "not found"]
       Just cfg -> io $ extractFromCFG opts (biSharedContext bic) cc cfg
 
 load_llvm_cfg :: BuiltinContext -> Options -> LLVMModule -> String -> TopLevel LLVM_CFG
 load_llvm_cfg bic opts lm fn_name =
   setupCrucibleContext bic opts lm $ \cc ->
     case Map.lookup (fromString fn_name) (Crucible.cfgMap (cc^.ccLLVMModuleTrans)) of
-      Nothing  -> fail $ unwords ["function", fn_name, "not found"]
+      Nothing  -> failRuntimeIO $ unwords ["function", fn_name, "not found"]
       Just cfg -> return (LLVM_CFG cfg)
 
 --------------------------------------------------------------------------------
@@ -750,7 +751,7 @@ showMemTypeDiff (path, l, r) = showPath path
     showPath (x : xs) = showStep x ++ " -> " ++ showPath xs
 
 -- | Succeed if the types have compatible memory layouts. Otherwise,
--- fail with a detailed message indicating how the types differ.
+-- failRuntimeIO with a detailed message indicating how the types differ.
 checkMemTypeCompatibility ::
   Crucible.HasPtrWidth (Crucible.ArchWidth arch) =>
   Crucible.MemType ->
@@ -760,7 +761,7 @@ checkMemTypeCompatibility t1 t2 =
   case diffMemTypes t1 t2 of
     [] -> return ()
     diffs ->
-      fail $ unlines $
+      failRuntimeIO $ unlines $
       ["types not memory-compatible:", show t1, show t2]
       ++ map showMemTypeDiff diffs
 
@@ -829,7 +830,7 @@ crucible_fresh_var bic _opts name lty = CrucibleSetupM $ do
   let dl = TyCtx.llvmDataLayout (cctx^.ccTypeCtx)
   mty <- liftIO $ logicTypeOfActual dl sc lty'
   case mty of
-    Nothing -> fail $ "Unsupported type in crucible_fresh_var: " ++ show (L.ppType lty)
+    Nothing -> failRuntimeIO $ "Unsupported type in crucible_fresh_var: " ++ show (L.ppType lty)
     Just ty -> freshVariable sc name ty
 
 -- | Allocated a fresh variable and record this allocation in the
@@ -866,13 +867,13 @@ memTypeForLLVMType :: BuiltinContext -> L.Type -> CrucibleSetup arch Crucible.Me
 memTypeForLLVMType _bic lty =
   do case TyCtx.liftMemType lty of
        Just m -> return m
-       Nothing -> fail ("unsupported type: " ++ show (L.ppType lty))
+       Nothing -> failRuntimeIO ("unsupported type: " ++ show (L.ppType lty))
 
 symTypeForLLVMType :: BuiltinContext -> L.Type -> CrucibleSetup arch Crucible.SymType
 symTypeForLLVMType _bic lty =
   do case TyCtx.liftType lty of
        Just m -> return m
-       Nothing -> fail ("unsupported type: " ++ show (L.ppType lty))
+       Nothing -> failRuntimeIO ("unsupported type: " ++ show (L.ppType lty))
 
 -- | See 'crucible_fresh_expanded_val'
 --
@@ -895,15 +896,15 @@ constructExpandedSetupValue sc t =
     Crucible.PtrType symTy ->
       case TyCtx.asMemType symTy of
         Just memTy ->  constructFreshPointer (Crucible.MemType memTy)
-        Nothing    -> fail ("lhs not a valid pointer type: " ++ show symTy)
+        Nothing    -> failRuntimeIO ("lhs not a valid pointer type: " ++ show symTy)
 
     Crucible.ArrayType n memTy ->
        SetupArray <$> replicateM n (constructExpandedSetupValue sc memTy)
 
-    Crucible.FloatType    -> fail "crucible_fresh_expanded_var: Float not supported"
-    Crucible.DoubleType   -> fail "crucible_fresh_expanded_var: Double not supported"
-    Crucible.MetadataType -> fail "crucible_fresh_expanded_var: Metadata not supported"
-    Crucible.VecType{}    -> fail "crucible_fresh_expanded_var: Vec not supported"
+    Crucible.FloatType    -> failRuntimeIO "crucible_fresh_expanded_var: Float not supported"
+    Crucible.DoubleType   -> failRuntimeIO "crucible_fresh_expanded_var: Double not supported"
+    Crucible.MetadataType -> failRuntimeIO "crucible_fresh_expanded_var: Metadata not supported"
+    Crucible.VecType{}    -> failRuntimeIO "crucible_fresh_expanded_var: Vec not supported"
 
 crucible_alloc :: BuiltinContext
                -> Options
@@ -913,7 +914,7 @@ crucible_alloc _bic _opt lty = CrucibleSetupM $
   do let ?dl = TyCtx.llvmDataLayout ?lc
      symTy <- case TyCtx.liftType lty of
        Just s -> return s
-       Nothing -> fail ("unsupported type in crucible_alloc: " ++ show (L.ppType lty))
+       Nothing -> failRuntimeIO ("unsupported type in crucible_alloc: " ++ show (L.ppType lty))
      n <- csVarCounter <<%= nextAllocIndex
      currentState.csAllocs.at n ?= symTy
      return (SetupVar n)
@@ -948,7 +949,7 @@ crucible_points_to typed _bic _opt ptr val = CrucibleSetupM $
           st <- get
           let rs = st^.csResolvedState
           if st^.csPrePost == PreState && testResolved ptr rs
-            then fail "Multiple points-to preconditions on same pointer"
+            then failRuntimeIO "Multiple points-to preconditions on same pointer"
             else csResolvedState %= markResolved ptr
           let env = csAllocations (st^.csMethodSpec)
           ptrTy <- typeOfSetupValue cc env ptr
@@ -956,8 +957,8 @@ crucible_points_to typed _bic _opt ptr val = CrucibleSetupM $
             Crucible.PtrType symTy ->
               case TyCtx.asMemType symTy of
                 Just lhsTy -> return lhsTy
-                Nothing -> fail $ "lhs not a valid pointer type: " ++ show ptrTy
-            _ -> fail $ "lhs not a pointer type: " ++ show ptrTy
+                Nothing -> failRuntimeIO $ "lhs not a valid pointer type: " ++ show ptrTy
+            _ -> failRuntimeIO $ "lhs not a pointer type: " ++ show ptrTy
           valTy <- typeOfSetupValue cc env val
           when typed (checkMemTypeCompatibility lhsTy valTy)
           addPointsTo (PointsTo ptr val)
@@ -983,7 +984,7 @@ crucible_precond ::
 crucible_precond p = CrucibleSetupM $ do
   st <- get
   when (st^.csPrePost == PostState) $
-    fail "attempt to use `crucible_precond` in post state"
+    failRuntimeIO "attempt to use `crucible_precond` in post state"
   addCondition (SetupCond_Pred p)
 
 crucible_postcond ::
@@ -992,7 +993,7 @@ crucible_postcond ::
 crucible_postcond p = CrucibleSetupM $ do
   st <- get
   when (st^.csPrePost == PreState) $
-    fail "attempt to use `crucible_postcond` in pre state"
+    failRuntimeIO "attempt to use `crucible_postcond` in pre state"
   addCondition (SetupCond_Pred p)
 
 crucible_execute_func :: BuiltinContext
@@ -1011,7 +1012,7 @@ crucible_execute_func _bic _opt args = CrucibleSetupM $ do
                                                  | t <- tps'
                                                  ]
 
-    _ -> fail $ unlines ["Function signature not supported:", show tps]
+    _ -> failRuntimeIO $ unlines ["Function signature not supported:", show tps]
 
 
 crucible_return :: BuiltinContext
@@ -1021,7 +1022,7 @@ crucible_return :: BuiltinContext
 crucible_return _bic _opt retval = CrucibleSetupM $ do
   ret <- use (csMethodSpec.csRetValue)
   case ret of
-    Just _ -> fail "crucible_return: duplicate return value specification"
+    Just _ -> failRuntimeIO "crucible_return: duplicate return value specification"
     Nothing -> csMethodSpec.csRetValue .= Just retval
 
 
@@ -1055,7 +1056,7 @@ crucible_setup_val_to_typed_term bic _opt sval = do
   opts <- getOptions
   mtt <- io $ MaybeT.runMaybeT $ setupToTypedTerm opts (biSharedContext bic) sval
   case mtt of
-    Nothing -> fail $ "Could not convert a setup value to a term: " ++ show sval
+    Nothing -> failRuntimeIO $ "Could not convert a setup value to a term: " ++ show sval
     Just tt -> return tt
 
 --------------------------------------------------------------------------------

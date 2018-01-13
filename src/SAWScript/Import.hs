@@ -17,6 +17,7 @@ import SAWScript.AST
 import SAWScript.Lexer (lexSAW)
 import SAWScript.Options
 import SAWScript.Parser
+import SAWScript.Exceptions (failRuntimeIO)
 
 import System.Directory
 import Control.Exception
@@ -38,7 +39,7 @@ findAndLoadFile opts fp = do
   let paths = importPath opts
   mfname <- findFile paths fp
   case mfname of
-    Nothing -> fail $ unlines $
+    Nothing -> failRuntimeIO $ unlines $
         [ "Couldn't find file: " ++ show fp
         , "  Searched in directories:"
         ] ++ map ("    " ++) paths

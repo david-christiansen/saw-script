@@ -18,6 +18,7 @@ import Text.PrettyPrint.ANSI.Leijen
 
 import Verifier.SAW.Cryptol (scCryptolEq)
 import qualified SAWScript.Value as SV (PPOpts(..), cryptolPPOpts, quietEvalOpts)
+import SAWScript.Exceptions (failRuntime)
 
 data VerificationCheck
   = AssertionCheck String Term
@@ -53,7 +54,7 @@ vcCounterexample sc opts (EqualityCheck nm impNode specNode) evalFn =
      sct <- scCryptolType sc sty
      let lschema = (C.Forall [] [] lct)
          sschema = (C.Forall [] [] sct)
-     unless (lschema == sschema) $ fail "Mismatched schemas in counterexample"
+     unless (lschema == sschema) $ failRuntime "Mismatched schemas in counterexample"
      let lv = exportValueWithSchema lschema ln
          sv = exportValueWithSchema sschema sn
          opts' = SV.cryptolPPOpts opts

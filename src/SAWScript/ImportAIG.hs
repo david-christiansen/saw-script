@@ -35,6 +35,7 @@ import qualified Data.ABC.GIA as ABC
 import Verifier.SAW.Prelude
 import Verifier.SAW.Recognizer
 import Verifier.SAW.SharedTerm hiding (scNot, scAnd, scOr)
+import SAWScript.Exceptions
 import SAWScript.Options
 
 type TypeParser = StateT (V.Vector Term) (ExceptT String IO)
@@ -202,6 +203,6 @@ verifyAIGCompatible x y = do
    let outx = AIG.networkOutputCount x
    let outy = AIG.networkOutputCount y
    when (inx /= iny) $ do
-       fail $ unwords ["AIG input counts do not match:", show inx, show iny]
+       failRuntimeIO $ unwords ["AIG input counts do not match:", show inx, show iny]
    when (outx /= outy) $ do
-       fail $ unwords ["AIG output counts do not match:", show outx, show outy]
+       failRuntimeIO $ unwords ["AIG output counts do not match:", show outx, show outy]

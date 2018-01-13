@@ -54,6 +54,7 @@ import Text.LLVM.DebugUtils as L
 import qualified Verifier.SAW.Simulator.SBV as SBV (sbvSolveBasic, toWord)
 import qualified Data.SBV.Dynamic as SBV (svAsInteger)
 
+import SAWScript.Exceptions
 import SAWScript.TypedTerm
 import SAWScript.Utils
 
@@ -117,7 +118,7 @@ typeOfSetupValue cc env val =
   do let ?lc = cc^.ccTypeCtx
      symTy <- typeOfSetupValue' cc env val
      case TyCtx.asMemType symTy of
-       Nothing -> fail "typeOfSetupValue: Not a memtype"
+       Nothing -> failRuntime "typeOfSetupValue: Not a memtype"
        Just x  -> return x
 
 typeOfSetupValue' ::
@@ -130,23 +131,23 @@ typeOfSetupValue' cc env val =
   case val of
     SetupVar i ->
       case Map.lookup i env of
-        Nothing -> fail ("typeOfSetupValue: Unresolved prestate variable:" ++ show i)
+        Nothing -> failRuntime ("typeOfSetupValue: Unresolved prestate variable:" ++ show i)
         Just symTy -> return (Crucible.MemType (Crucible.PtrType symTy))
     SetupTerm tt ->
       case ttSchema tt of
         Cryptol.Forall [] [] ty ->
           case toLLVMType dl (Cryptol.evalValType Map.empty ty) of
-            Nothing -> fail "typeOfSetupValue: non-representable type"
+            Nothing -> failRuntime "typeOfSetupValue: non-representable type"
             Just memTy -> return (Crucible.MemType memTy)
-        s -> fail $ unlines [ "typeOfSetupValue: expected monomorphic term"
-                            , "instead got:"
-                            , show (Cryptol.pp s)
-                            ]
+        s -> failRuntime $ unlines [ "typeOfSetupValue: expected monomorphic term"
+                                   , "instead got:"
+                                   , show (Cryptol.pp s)
+                                   ]
     SetupStruct vs ->
       do memTys <- traverse (typeOfSetupValue cc env) vs
          let si = Crucible.mkStructInfo dl False memTys
          return (Crucible.MemType (Crucible.StructType si))
-    SetupArray [] -> fail "typeOfSetupValue: invalid empty crucible_array"
+    SetupArray [] -> failRuntime "typeOfSetupValue: invalid empty crucible_array"
     SetupArray (v : vs) ->
       do memTy <- typeOfSetupValue cc env v
          _memTys <- traverse (typeOfSetupValue cc env) vs
@@ -154,7 +155,7 @@ typeOfSetupValue' cc env val =
          return (Crucible.MemType (Crucible.ArrayType (length (v:vs)) memTy))
     SetupField v n ->
       case resolveSetupFieldIndex cc env v n of
-        Nothing -> fail ("Unable to resolve field name: " ++ show n)
+        Nothing -> failRuntime ("Unable to resolve field name: " ++ show n)
         Just i  -> typeOfSetupValue' cc env (SetupElem v i)
     SetupElem v i ->
       do memTy <- typeOfSetupValue cc env v
@@ -166,14 +167,14 @@ typeOfSetupValue' cc env val =
                  case memTy' of
                    Crucible.ArrayType n memTy''
                      | i < n -> return (Crucible.MemType (Crucible.PtrType (Crucible.MemType memTy'')))
-                     | otherwise -> fail $ "typeOfSetupValue: array type index out of bounds: " ++ show (i, n)
+                     | otherwise -> failRuntime $ "typeOfSetupValue: array type index out of bounds: " ++ show (i, n)
                    Crucible.StructType si ->
                      case Crucible.siFieldInfo si i of
                        Just fi -> return (Crucible.MemType (Crucible.PtrType (Crucible.MemType (Crucible.fiType fi))))
-                       Nothing -> fail $ "typeOfSetupValue: struct type index out of bounds: " ++ show i
-                   _ -> fail msg
-               Nothing -> fail msg
-           _ -> fail msg
+                       Nothing -> failRuntime $ "typeOfSetupValue: struct type index out of bounds: " ++ show i
+                   _ -> failRuntime msg
+               Nothing -> failRuntime msg
+           _ -> failRuntime msg
     SetupNull ->
       -- We arbitrarily set the type of NULL to void*, because a) it
       -- is memory-compatible with any type that NULL can be used at,
@@ -186,10 +187,10 @@ typeOfSetupValue' cc env val =
                    [ (L.decName d, L.decFunType d) | d <- L.modDeclares m ] ++
                    [ (L.defName d, L.defFunType d) | d <- L.modDefines m ]
          case lookup (L.Symbol name) tys of
-           Nothing -> fail $ "typeOfSetupValue: unknown global " ++ show name
+           Nothing -> failRuntime $ "typeOfSetupValue: unknown global " ++ show name
            Just ty ->
              case let ?lc = lc in TyCtx.liftType ty of
-               Nothing -> fail $ "typeOfSetupValue: invalid type " ++ show ty
+               Nothing -> failRuntime $ "typeOfSetupValue: invalid type " ++ show ty
                Just symTy -> return (Crucible.MemType (Crucible.PtrType symTy))
   where
     lc = cc^.ccTypeCtx
@@ -208,7 +209,7 @@ resolveSetupVal cc env tyenv val =
   case val of
     SetupVar i
       | Just ptr <- Map.lookup i env -> return (Crucible.ptrToPtrVal ptr)
-      | otherwise -> fail ("resolveSetupVal: Unresolved prestate variable:" ++ show i)
+      | otherwise -> failRuntimeIO ("resolveSetupVal: Unresolved prestate variable:" ++ show i)
     SetupTerm tm -> resolveTypedTerm cc tm
     SetupStruct vs -> do
       vals <- mapM (resolveSetupVal cc env tyenv) vs
@@ -217,14 +218,14 @@ resolveSetupVal cc env tyenv val =
             Crucible.Struct v -> v
             _ -> error "impossible"
       return $ Crucible.LLVMValStruct (V.zip flds (V.fromList vals))
-    SetupArray [] -> fail "resolveSetupVal: invalid empty array"
+    SetupArray [] -> failRuntimeIO "resolveSetupVal: invalid empty array"
     SetupArray vs -> do
       vals <- V.mapM (resolveSetupVal cc env tyenv) (V.fromList vs)
       let tp = typeOfLLVMVal dl (V.head vals)
       return $ Crucible.LLVMValArray tp vals
     SetupField v n ->
       case resolveSetupFieldIndex cc tyenv v n of
-        Nothing -> fail ("Unable to resolve field name: " ++ show n)
+        Nothing -> failRuntimeIO ("Unable to resolve field name: " ++ show n)
         Just i  -> resolveSetupVal cc env tyenv (SetupElem v i)
     SetupElem v i ->
       do memTy <- typeOfSetupValue cc tyenv v
@@ -239,17 +240,17 @@ resolveSetupVal cc env tyenv val =
                    Crucible.StructType si ->
                      case Crucible.siFieldOffset si i of
                        Just d -> return d
-                       Nothing -> fail $ "resolveSetupVal: struct type index out of bounds: " ++ show (i, memTy')
-                   _ -> fail msg
-               Nothing -> fail msg
-           _ -> fail msg
+                       Nothing -> failRuntimeIO $ "resolveSetupVal: struct type index out of bounds: " ++ show (i, memTy')
+                   _ -> failRuntimeIO msg
+               Nothing -> failRuntimeIO msg
+           _ -> failRuntimeIO msg
          ptr <- resolveSetupVal cc env tyenv v
          case ptr of
            Crucible.LLVMValInt blk off ->
              do delta' <- Crucible.bvLit sym (Crucible.bvWidth off) (Crucible.bytesToInteger delta)
                 off' <- Crucible.bvAdd sym off delta'
                 return (Crucible.LLVMValInt blk off')
-           _ -> fail "resolveSetupVal: crucible_elem requires pointer value"
+           _ -> failRuntimeIO "resolveSetupVal: crucible_elem requires pointer value"
     SetupNull ->
       Crucible.ptrToPtrVal <$> Crucible.mkNullPointer sym Crucible.PtrWidth
     SetupGlobal name ->
@@ -269,7 +270,7 @@ resolveTypedTerm cc tm =
   case ttSchema tm of
     Cryptol.Forall [] [] ty ->
       resolveSAWTerm cc (Cryptol.evalValType Map.empty ty) (ttTerm tm)
-    _ -> fail "resolveSetupVal: expected monomorphic term"
+    _ -> failRuntimeIO "resolveSetupVal: expected monomorphic term"
 
 resolveSAWPred ::
   CrucibleContext wptr ->
@@ -287,9 +288,9 @@ resolveSAWTerm ::
 resolveSAWTerm cc tp tm =
     case tp of
       Cryptol.TVBit ->
-        fail "resolveSAWTerm: unimplemented type Bit (FIXME)"
+        failRuntimeIO "resolveSAWTerm: unimplemented type Bit (FIXME)"
       Cryptol.TVInteger ->
-        fail "resolveSAWTerm: unimplemented type Integer (FIXME)"
+        failRuntimeIO "resolveSAWTerm: unimplemented type Integer (FIXME)"
       Cryptol.TVSeq sz Cryptol.TVBit ->
         case Crucible.someNat sz of
           Just (Crucible.Some w)
@@ -307,7 +308,7 @@ resolveSAWTerm cc tp tm =
                         Just x  -> Crucible.bvLit sym w x
                         Nothing -> Crucible.bindSAWTerm sym (Crucible.BaseBVRepr w) tm'
                  Crucible.ptrToPtrVal <$> Crucible.llvmPointer_bv sym v
-          _ -> fail ("Invalid bitvector width: " ++ show sz)
+          _ -> failRuntimeIO ("Invalid bitvector width: " ++ show sz)
       Cryptol.TVSeq sz tp' ->
         do sc    <- Crucible.saw_ctx <$> (readIORef (Crucible.sbStateManager sym))
            sz_tm <- scNat sc (fromIntegral sz)
@@ -316,12 +317,12 @@ resolveSAWTerm cc tp tm =
                         tm' <- scAt sc sz_tm tp_tm tm i_tm
                         resolveSAWTerm cc tp' tm'
            case toLLVMType dl tp' of
-             Nothing -> fail "resolveSAWTerm: invalid type"
+             Nothing -> failRuntimeIO "resolveSAWTerm: invalid type"
              Just mt -> do
                gt <- Crucible.toStorableType mt
                Crucible.LLVMValArray gt . V.fromList <$> mapM f [ 0 .. (sz-1) ]
       Cryptol.TVStream _tp' ->
-        fail "resolveSAWTerm: invalid infinite stream type"
+        failRuntimeIO "resolveSAWTerm: invalid infinite stream type"
       Cryptol.TVTuple tps ->
         do sc <- Crucible.saw_ctx <$> (readIORef (Crucible.sbStateManager sym))
            tms <- mapM (scTupleSelector sc tm) [1 .. length tps]
@@ -329,16 +330,16 @@ resolveSAWTerm cc tp tm =
            storTy <-
              case toLLVMType dl tp of
                Just memTy -> Crucible.toStorableType memTy
-               _ -> fail "resolveSAWTerm: invalid tuple type"
+               _ -> failRuntimeIO "resolveSAWTerm: invalid tuple type"
            fields <-
              case Crucible.typeF storTy of
                Crucible.Struct fields -> return fields
-               _ -> fail "resolveSAWTerm: impossible: expected struct"
+               _ -> failRuntimeIO "resolveSAWTerm: impossible: expected struct"
            return (Crucible.LLVMValStruct (V.zip fields (V.fromList vals)))
       Cryptol.TVRec _flds ->
-        fail "resolveSAWTerm: unimplemented record type (FIXME)"
+        failRuntimeIO "resolveSAWTerm: unimplemented record type (FIXME)"
       Cryptol.TVFun _ _ ->
-        fail "resolveSAWTerm: invalid function type"
+        failRuntimeIO "resolveSAWTerm: invalid function type"
   where
     sym = cc^.ccBackend
     dl = TyCtx.llvmDataLayout (cc^.ccTypeCtx)

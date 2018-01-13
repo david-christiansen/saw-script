@@ -33,6 +33,7 @@ import Verifier.SAW.Recognizer
 import Verifier.SAW.SharedTerm
 
 import qualified SAWScript.CongruenceClosure as CC
+import SAWScript.Exceptions
 import SAWScript.JavaExpr
 import SAWScript.TypedTerm
 
@@ -58,7 +59,7 @@ arrayApply sc fn tm = do
       l <- scNat sc n
       f <- fn sc
       f l tm
-    _ -> fail "Invalid type passed to extendArray"
+    _ -> failRuntimeIO "Invalid type passed to extendArray"
 
 japply :: (SharedContext -> IO (a -> IO b)) -> SharedContext -> a -> IO b
 japply fn sc tm = fn sc >>= \f -> f tm
@@ -76,7 +77,7 @@ extendToIValue sc ty tm = do
     JSS.ArrayType JSS.CharType -> arrayApply sc scApplyJava_extendCharArray tm
     JSS.ArrayType JSS.ShortType -> arrayApply sc scApplyJava_extendShortArray tm
     JSS.ArrayType JSS.IntType -> return tm
-    _ -> fail $ "Invalid type passed to extendToIValue: " ++ show ty
+    _ -> failRuntimeIO $ "Invalid type passed to extendToIValue: " ++ show ty
 
 truncateIValue :: SharedContext -> JSS.Type -> Term -> IO Term
 truncateIValue sc ty tm = do
@@ -91,7 +92,7 @@ truncateIValue sc ty tm = do
     JSS.ArrayType JSS.CharType -> arrayApply sc scApplyJava_truncCharArray tm
     JSS.ArrayType JSS.ShortType -> arrayApply sc scApplyJava_truncShortArray tm
     JSS.ArrayType JSS.IntType -> return tm
-    _ -> fail $ "Invalid type passed to truncateIValue: " ++ show ty
+    _ -> failRuntimeIO $ "Invalid type passed to truncateIValue: " ++ show ty
 
 termTypeCompatible :: SharedContext -> Term -> JSS.Type -> IO Bool
 termTypeCompatible sc tm ty = do
@@ -118,7 +119,7 @@ termTypeToJSSType sc t = do
     (asBitvectorType -> Just 64) -> return JSS.IntType
     (asVecType -> Just (_ :*: ety)) ->
       JSS.ArrayType <$> termTypeToJSSType sc ety
-    _ -> fail "Invalid type for termTypeToJSSType"
+    _ -> failRuntimeIO "Invalid type for termTypeToJSSType"
 
 -- SpecPathState {{{1
 
@@ -163,15 +164,15 @@ getStaticFieldValuePS ps f =
 
 -- | Returns value constructor from node.
 mkJSSValue :: SharedContext -> Type -> Term -> IO SpecJavaValue
-mkJSSValue _ (ClassType _) _ = fail "mkJSSValue called on class type"
-mkJSSValue _ (ArrayType _) _ = fail "mkJSSValue called on array type"
-mkJSSValue _ FloatType  _ = fail "mkJSSValue called on float type"
-mkJSSValue _ DoubleType _ = fail "mkJSSValue called on double type"
+mkJSSValue _ (ClassType _) _ = failRuntimeIO "mkJSSValue called on class type"
+mkJSSValue _ (ArrayType _) _ = failRuntimeIO "mkJSSValue called on array type"
+mkJSSValue _ FloatType  _ = failRuntimeIO "mkJSSValue called on float type"
+mkJSSValue _ DoubleType _ = failRuntimeIO "mkJSSValue called on double type"
 mkJSSValue sc LongType  n = do
   ty <- scTypeOf sc n
   case ty of
     (asBitvectorType -> Just 64) -> return (LValue n)
-    _ -> fail "internal: invalid LValue passed to mkJSSValue."
+    _ -> failRuntimeIO "internal: invalid LValue passed to mkJSSValue."
 mkJSSValue sc ty n = IValue <$> extendToIValue sc ty n
 
 writeJavaTerm :: (MonadSim SharedContext m) =>
@@ -189,13 +190,13 @@ writeJavaValue :: (MonadSim SharedContext m) =>
                -> Simulator SharedContext m ()
 writeJavaValue (CC.Term e) v =
   case e of
-    ReturnVal _ -> fail "Can't set return value"
+    ReturnVal _ -> failRuntimeIO "Can't set return value"
     Local _ idx _ -> setLocal idx v
     InstanceField rexp f -> do
       rv <- readJavaValueSim rexp
       case rv of
         RValue r -> setInstanceFieldValue r f v
-        _ -> fail "Instance argument of instance field evaluates to non-reference"
+        _ -> failRuntimeIO "Instance argument of instance field evaluates to non-reference"
     StaticField f -> setStaticFieldValue f v
 
 writeJavaValuePS :: (Functor m, Monad m) =>
@@ -208,7 +209,7 @@ writeJavaValuePS (CC.Term e) v ps =
     ReturnVal _ -> return (ps & set pathRetVal (Just v))
     Local _ i _ ->
       case ps ^. pathStack of
-        [] -> fail "no stack frames"
+        [] -> failRuntime "no stack frames"
         (cf:cfs) -> do
           let cf' = cf & cfLocals %~ Map.insert i v
           return (ps & pathStack .~ (cf':cfs))
@@ -216,7 +217,7 @@ writeJavaValuePS (CC.Term e) v ps =
       rv <- readJavaValue ((^. cfLocals) <$> currentCallFrame ps) ps rexp
       case rv of
         RValue r -> return (setInstanceFieldValuePS r f v ps)
-        _ -> fail "Instance argument of instance field evaluates to non-reference"
+        _ -> failRuntime "Instance argument of instance field evaluates to non-reference"
     StaticField f -> return (setStaticFieldValuePS f v ps)
 
 readJavaTerm :: (Functor m, Monad m, MonadIO m) =>
@@ -240,10 +241,10 @@ termOfValue sc ps tp (RValue r@(Ref _ (ArrayType ety))) = do
   case (Map.lookup r (ps ^. pathMemory . memScalarArrays), ety) of
     (Just (_, a), JSS.LongType) -> return a
     (Just (_, a), _) -> liftIO $ truncateIValue sc tp a
-    (Nothing, _) -> fail "Reference not found in arrays map"
+    (Nothing, _) -> failRuntimeIO "Reference not found in arrays map"
 termOfValue _ _ _ (RValue (Ref _ (ClassType _))) =
-  fail "Translating objects to terms not yet implemented" -- TODO
-termOfValue _ _ _ _ = fail "Can't convert term to value"
+  failRuntimeIO "Translating objects to terms not yet implemented" -- TODO
+termOfValue _ _ _ _ = failRuntimeIO "Can't convert term to value"
 
 termOfValueSim :: (Functor m, Monad m) =>
                   SharedContext -> JSS.Type -> SpecJavaValue
@@ -273,7 +274,7 @@ valueOfTerm sc jty (TypedTerm _schema t) = do
     (asVecType -> Just (n :*: _), JSS.ArrayType ety) -> do
       t' <- liftIO $ extendToIValue sc jty t
       RValue <$> newSymbolicArray (ArrayType ety) (fromIntegral n) t'
-    _ -> fail $ "Can't translate term of type: " ++ show ty ++ " to Java type " ++ show jty
+    _ -> failRuntimeIO $ "Can't translate term of type: " ++ show ty ++ " to Java type " ++ show jty
 -- If vector of other things, allocate array, translate those things, and store
 -- If record, allocate appropriate object, translate fields, assign fields
 -- For the last case, we need information about the desired Java type
@@ -291,14 +292,14 @@ readJavaValue mlocals ps (CC.Term e) = do
     ReturnVal _ ->
       case ps ^. pathRetVal of
         Just rv -> return rv
-        Nothing -> fail "Return value not found"
+        Nothing -> failRuntime "Return value not found"
     Local _ idx _ ->
       case mlocals of
         Just locals ->
           case Map.lookup idx locals of
             Just v -> return v
-            Nothing -> fail $ "Local variable " ++ show idx ++ " not found"
-        Nothing -> fail "Trying to read local variable with no call frame."
+            Nothing -> failRuntime $ "Local variable " ++ show idx ++ " not found"
+        Nothing -> failRuntime "Trying to read local variable with no call frame."
     InstanceField rexp f -> do
       rv <- readJavaValue mlocals ps rexp
       case rv of
@@ -306,14 +307,14 @@ readJavaValue mlocals ps (CC.Term e) = do
           let ifields = ps ^. pathMemory . memInstanceFields
           case Map.lookup (ref, f) ifields of
             Just fv -> return fv
-            _ -> fail $ "Instance field '" ++ fieldIdName f ++ "' not found."
-        _ -> fail "Object of instance field selector evaluated to non-reference."
+            _ -> failRuntime $ "Instance field '" ++ fieldIdName f ++ "' not found."
+        _ -> failRuntime "Object of instance field selector evaluated to non-reference."
     StaticField f -> do
       let sfields = ps ^. pathMemory . memStaticFields
       case Map.lookup f sfields of
         Just v -> return v
-        _ -> fail $ "Static field '" ++ fieldIdName f ++
-                    "' not found in class '" ++ fieldIdClass f ++ "'"
+        _ -> failRuntime $ "Static field '" ++ fieldIdName f ++
+                           "' not found in class '" ++ fieldIdClass f ++ "'"
 
 readJavaValueSim :: (Monad m) =>
                     JavaExpr
@@ -366,7 +367,7 @@ freshJavaVal _ _ (PrimitiveType ty) = do
     ShortType   -> withSBE $ \sbe -> IValue <$> freshShort sbe
     IntType     -> withSBE $ \sbe -> IValue <$> freshInt sbe
     LongType    -> withSBE $ \sbe -> LValue <$> freshLong sbe
-    _ -> fail $ "Can't create fresh primitive value of type " ++ show ty
+    _ -> failRuntimeIO $ "Can't create fresh primitive value of type " ++ show ty
 freshJavaVal argsRef sc (ArrayInstance n ty) | isPrimitiveType ty = do
   -- TODO: should this use bvAt?
   elts <- liftIO $ do
@@ -379,10 +380,10 @@ freshJavaVal argsRef sc (ArrayInstance n ty) | isPrimitiveType ty = do
   case ty of
     LongType -> RValue <$> newLongArray elts
     _ | isIValue ty -> RValue <$> newIntArray (ArrayType ty) elts
-    _ -> fail $ "Can't create array with element type " ++ show ty
+    _ -> failRuntimeIO $ "Can't create array with element type " ++ show ty
 -- TODO: allow input declarations to specialize types of fields
 freshJavaVal _ _ (ArrayInstance _ _) =
-  fail $ "Can't create fresh array of non-scalar elements"
+  failRuntimeIO $ "Can't create fresh array of non-scalar elements"
 freshJavaVal argsRef sc (ClassInstance c) = do
   r <- createInstance (className c) Nothing
   forM_ (classFields c) $ \f -> do

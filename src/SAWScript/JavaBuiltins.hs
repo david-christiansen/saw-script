@@ -48,6 +48,7 @@ import SAWScript.JavaUtils
 
 import SAWScript.Builtins
 import SAWScript.CryptolEnv (schemaNoUser)
+import SAWScript.Exceptions
 import SAWScript.Options
 import SAWScript.Proof
 import SAWScript.TypedTerm
@@ -102,10 +103,10 @@ symexecJava bic opts cls mname inputs outputs satBranches = do
   let mkAssign (s, tm) = do
         e <- parseJavaExpr' cb cls meth s
         return (e, tm)
-      multDefErr i = error $ "Multiple terms given for " ++ ordinal (i + 1) ++
-                             " argument in method " ++ methodName meth
-      noDefErr i = fail $ "No binding for " ++ ordinal (i + 1) ++
-                          " argument in method " ++ methodName meth
+      multDefErr i = failRuntime $ "Multiple terms given for " ++ ordinal (i + 1) ++
+                                   " argument in method " ++ methodName meth
+      noDefErr i = failRuntimeIO $ "No binding for " ++ ordinal (i + 1) ++
+                                   " argument in method " ++ methodName meth
       pidx = fromIntegral . localIndexOfParameter meth
   withSAWBackend Nothing $ \sbe -> io $ do
     runSimulator cb sbe defaultSEH (Just fl) $ do
@@ -120,9 +121,10 @@ symexecJava bic opts cls mname inputs outputs satBranches = do
       let expectedArgTys = methodParameterTypes meth
       forM_ (zip actualArgTys expectedArgTys) $ \ (aty, ety) -> do
         comp <- liftIO $ termTypeCompatible jsc aty ety
-        unless comp $ fail $
-          "Passing value of type " ++ show aty ++
-          " to argument expected to be of type " ++ show ety ++ "."
+        unless comp $
+          failRuntimeIO $
+            "Passing value of type " ++ show aty ++
+            " to argument expected to be of type " ++ show ety ++ "."
       args <- mapM (uncurry (valueOfTerm jsc)) (zip expectedArgTys argTms)
       mapM_ (uncurry (writeJavaTerm jsc)) otherAssigns
       allArgs <- case methodIsStatic meth of
@@ -133,7 +135,7 @@ symexecJava bic opts cls mname inputs outputs satBranches = do
       let localMap = setupLocals allArgs
       mp <- execMethod (className cls) (methodKey meth) localMap
       ps <- case mp of
-              Nothing -> fail "No paths returned from execMethod"
+              Nothing -> failRuntimeIO "No paths returned from execMethod"
               Just (ps, _) -> return ps
       outtms <- forM outputs $ \ostr -> do
         case ostr of
@@ -161,7 +163,7 @@ extractJava bic opts cls mname setup = do
         meth = specMethod (jsSpec setupRes)
     io $ runSimulator cb sbe defaultSEH (Just fl) $ do
       setVerbosity (simVerbose opts)
-      argTypes <- either fail return (getActualArgTypes setupRes)
+      argTypes <- either failRuntimeIO return (getActualArgTypes setupRes)
       args <- mapM (freshJavaVal (Just argsRef) jsc) argTypes
       -- TODO: support initializing other state elements
       rslt <- case methodIsStatic meth of
@@ -170,8 +172,8 @@ extractJava bic opts cls mname setup = do
                   RValue this <- freshJavaVal (Just argsRef) jsc (ClassInstance cls)
                   execInstanceMethod (className cls) (methodKey meth) this args
       dt <- case (rslt, methodReturnType meth) of
-              (Nothing, _) -> fail $ "No return value from " ++ methodName meth
-              (_, Nothing) -> fail $ "Return value from void method " ++ methodName meth
+              (Nothing, _) -> failRuntimeIO $ "No return value from " ++ methodName meth
+              (_, Nothing) -> failRuntimeIO $ "Return value from void method " ++ methodName meth
               (Just v, Just tp) -> termOfValueSim jsc tp v
       liftIO $ do
         let sc = biSharedContext bic
@@ -313,7 +315,7 @@ showCexResults vpopts sc opts ms vs exts vals = do
     else do printOutLn vpopts Info $ "ERROR: Can't show result, wrong number of values"
             printOutLn vpopts Info $ "Constants: " ++ show (map ecName exts)
             printOutLn vpopts Info $ "Value names: " ++ show (map fst vals)
-  fail "Proof failed."
+  failRuntimeIO "Proof failed."
 
 mkMixedExpr :: Term -> JavaSetup MixedExpr
 mkMixedExpr (asJavaExpr -> Just s) =
@@ -366,9 +368,9 @@ checkCompatibleType sc msg aty schema = do
   cty <- liftIO $ cryptolTypeOfActual sc aty
   case cty of
     Nothing ->
-      fail $ "Type is not translatable: " ++ show aty ++ " (" ++ msg ++ ")"
+      failRuntimeIO $ "Type is not translatable: " ++ show aty ++ " (" ++ msg ++ ")"
     Just lt -> do
-      unless (Cryptol.Forall [] [] lt == schemaNoUser schema) $ fail $
+      unless (Cryptol.Forall [] [] lt == schemaNoUser schema) $ failRuntimeIO $
         unlines [ "Incompatible type:"
                 , "  Expected: " ++ Cryptol.pretty lt
                 , "  Got: " ++ Cryptol.pretty schema
@@ -379,7 +381,7 @@ parseJavaExpr' :: (MonadIO m) =>
                   JSS.Codebase -> JSS.Class -> JSS.Method -> String
                -> m JavaExpr
 parseJavaExpr' cb cls meth name =
-  liftIO (runExceptT (parseJavaExpr cb cls meth name) >>= either fail return)
+  liftIO (runExceptT (parseJavaExpr cb cls meth name) >>= either failRuntimeIO return)
 
 getJavaExpr :: String -> String -> JavaSetup (JavaExpr, JavaActualType)
 getJavaExpr ctx name = do
@@ -390,7 +392,7 @@ getJavaExpr ctx name = do
   e <- parseJavaExpr' cb cls meth name
   case Map.lookup e (bsActualTypeMap (specBehaviors ms)) of
     Just ty -> return (e, ty)
-    Nothing -> fail $ renderDoc $
+    Nothing -> failRuntimeIO $ renderDoc $
       hsep [ "Unknown expression", ftext name, "in",  ftext ctx ] <> "."
       <$$>
       ftext "Maybe you're missing a `java_var` or `java_class_var`?"
@@ -408,7 +410,7 @@ typeJavaExpr bic name ty = do
 
 checkEqualTypes :: Type -> Type -> String -> JavaSetup ()
 checkEqualTypes declared actual name =
-  when (declared /= actual) $ fail $ show $
+  when (declared /= actual) $ failRuntimeIO $ show $
     hsep [ text "WARNING: Declared type"
          , text (show (ppType declared)) -- TODO: change pretty-printer
          , text "doesn't match actual type"
@@ -440,7 +442,7 @@ javaClassVar bic _ name t = do
   (expr, aty) <- typeJavaExpr bic name t
   case aty of
     ClassInstance _ -> return ()
-    _ -> fail "Can't use `java_class_var` with variable of non-class type."
+    _ -> failRuntimeIO "Can't use `java_class_var` with variable of non-class type."
   modifySpec (specAddVarDecl expr aty)
 
 javaVar :: BuiltinContext -> Options -> String -> JavaType
@@ -448,7 +450,7 @@ javaVar :: BuiltinContext -> Options -> String -> JavaType
 javaVar bic _ name t = do
   (expr, aty) <- typeJavaExpr bic name t
   case aty of
-    ClassInstance _ -> fail "Can't use `java_var` with variable of class type."
+    ClassInstance _ -> failRuntimeIO "Can't use `java_var` with variable of class type."
     _ -> return ()
   modifySpec (specAddVarDecl expr aty)
   let sc = biSharedContext bic
@@ -460,7 +462,7 @@ javaMayAlias :: [String] -> JavaSetup ()
 javaMayAlias exprs = do
   exprList <- mapM (getJavaExpr "java_may_alias") exprs
   forM_ exprList $ \(e, _) ->
-    unless (isRefJavaExpr e) $ fail $
+    unless (isRefJavaExpr e) $ failRuntimeIO $
       "Can't use `java_may_alias` with non-reference variable: " ++
       ppJavaExpr e
   modifySpec (specAddAliasSet (map fst exprList))
@@ -468,11 +470,11 @@ javaMayAlias exprs = do
 javaAssert :: TypedTerm -> JavaSetup ()
 javaAssert (TypedTerm schema v) = do
   unless (schemaNoUser schema == Cryptol.Forall [] [] Cryptol.tBit) $
-    fail $ "java_assert passed expression of non-boolean type: " ++ show schema
+    failRuntimeIO $ "java_assert passed expression of non-boolean type: " ++ show schema
   me <- mkMixedExpr v
   case me of
     LE le -> modifySpec (specAddAssumption le)
-    JE je -> fail $ "Used java_assert with Java expression: " ++ show je
+    JE je -> failRuntimeIO $ "Used java_assert with Java expression: " ++ show je
 
 javaAssertEq :: BuiltinContext -> Options -> String -> TypedTerm -> JavaSetup ()
 javaAssertEq bic _ name (TypedTerm schema t) = do
@@ -485,7 +487,7 @@ javaEnsureEq :: BuiltinContext -> Options -> String -> TypedTerm -> JavaSetup ()
 javaEnsureEq bic _ name (TypedTerm schema t) = do
   ms <- gets jsSpec
   (expr, aty) <- (getJavaExpr "java_ensure_eq") name
-  when (isArg (specMethod ms) expr && isScalarExpr expr) $ fail $
+  when (isArg (specMethod ms) expr && isScalarExpr expr) $ failRuntimeIO $
     "The `java_ensure_eq` function cannot be used " ++
     "to set the value of a scalar argument."
   checkCompatibleType (biSharedContext bic) "java_ensure_eq" aty schema
@@ -494,21 +496,21 @@ javaEnsureEq bic _ name (TypedTerm schema t) = do
     (_, ArrayInstance _ _) -> return (EnsureArray fixPos expr me)
     (InstanceField r f, _) -> return (EnsureInstanceField fixPos r f me)
     (StaticField f, _) -> return (EnsureStaticField fixPos f me)
-    _ -> fail $ "invalid java_ensure target: " ++ name
+    _ -> failRuntimeIO $ "invalid java_ensure target: " ++ name
   modifySpec (specAddBehaviorCommand cmd)
 
 javaModify :: String -> JavaSetup ()
 javaModify name = do
   ms <- gets jsSpec
   (expr, aty) <- (getJavaExpr "java_modify") name
-  when (isArg (specMethod ms) expr && isScalarExpr expr) $ fail $
+  when (isArg (specMethod ms) expr && isScalarExpr expr) $ failRuntimeIO $
     "The `java_modify` function cannot be used " ++
     "to set the value of a scalar argument."
   cmd <- case (CC.unTerm expr, aty) of
     (_, ArrayInstance _ _) -> return (ModifyArray expr aty)
     (InstanceField r f, _) -> return (ModifyInstanceField r f)
     (StaticField f, _) -> return (ModifyStaticField f)
-    _ -> fail $ "invalid java_modify target: " ++ name
+    _ -> failRuntimeIO $ "invalid java_modify target: " ++ name
   modifySpec (specAddBehaviorCommand cmd)
 
 javaReturn :: TypedTerm -> JavaSetup ()
@@ -521,7 +523,7 @@ javaReturn (TypedTerm _ t) = do
       me <- mkMixedExpr t
       modifySpec (specAddBehaviorCommand (ReturnValue me))
     Nothing ->
-      fail $ "can't use `java_return` on void method " ++ methodName meth
+      failRuntimeIO $ "can't use `java_return` on void method " ++ methodName meth
 
 javaVerifyTactic :: ProofScript SatResult -> JavaSetup ()
 javaVerifyTactic script =

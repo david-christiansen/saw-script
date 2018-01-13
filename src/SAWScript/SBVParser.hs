@@ -29,6 +29,7 @@ import Verifier.SAW.TypedAST
 import Verifier.SAW.SharedTerm
 import qualified SAWScript.SBVModel as SBV
 import SAWScript.Options
+import SAWScript.Exceptions (failRuntimeIO)
 
 type NodeCache = Map SBV.NodeId Term
 
@@ -39,7 +40,7 @@ parseSBV sc _ (SBV.SBV size (Left num)) =
 parseSBV _ nodes (SBV.SBV size (Right nodeid)) =
     case Map.lookup nodeid nodes of
       Just t -> return (fromIntegral size, t)
-      Nothing -> fail "parseSBV"
+      Nothing -> failRuntimeIO "parseSBV"
 
 type UnintMap = String -> Typ -> Maybe Term
 
@@ -65,7 +66,7 @@ parseSBVExpr opts sc unint nodes size (SBV.SBVApp operator sbvs) =
                    s <- scBitvector sc size
                    cond <- scBv1ToBool sc arg1
                    scIte sc s cond arg2 arg3
-            _ -> fail "parseSBVExpr: wrong number of arguments for if-then-else"
+            _ -> failRuntimeIO "parseSBVExpr: wrong number of arguments for if-then-else"
       SBV.BVShl -> shiftop scBvShiftL sbvs
       SBV.BVShr -> shiftop scBvShiftR sbvs
       SBV.BVRol -> shiftop scBvRotateL sbvs
@@ -74,15 +75,18 @@ parseSBVExpr opts sc unint nodes size (SBV.SBVApp operator sbvs) =
           case sbvs of
             [sbv1] ->
                 do (size1, arg1) <- parseSBV sc nodes sbv1
-                   unless (size == fromInteger (hi + 1 - lo)) (fail $ "parseSBVExpr BVExt: size mismatch " ++ show (size, hi, lo))
+                   unless (size == fromInteger (hi + 1 - lo)) $
+                     failRuntimeIO $
+                        "parseSBVExpr BVExt: size mismatch " ++
+                        show (size, hi, lo)
                    b <- scBoolType sc
                    s1 <- scNat sc (size1 - 1 - fromInteger hi)
                    s2 <- scNat sc size
                    s3 <- scNat sc (fromInteger lo)
                    -- SBV indexes bits starting with 0 = lsb.
                    scSlice sc b s1 s2 s3 arg1
-            _ -> fail "parseSBVExpr: wrong number of arguments for extract"
-      SBV.BVExt{} -> fail "parseSBVExpr: BVExt bad arguments"
+            _ -> failRuntimeIO "parseSBVExpr: wrong number of arguments for extract"
+      SBV.BVExt{} -> failRuntimeIO "parseSBVExpr: BVExt bad arguments"
       SBV.BVAnd -> binop scBvAnd sbvs
       SBV.BVOr  -> binop scBvOr  sbvs
       SBV.BVXor -> binop scBvXor sbvs
@@ -91,9 +95,11 @@ parseSBVExpr opts sc unint nodes size (SBV.SBVApp operator sbvs) =
             [sbv1] ->
                 do (size1, arg1) <- parseSBV sc nodes sbv1
                    s1 <- scNat sc size1
-                   unless (size == size1) (fail $ "parseSBVExpr BVNot: size mismatch " ++ show (size, size1))
+                   unless (size == size1) $
+                     failRuntimeIO $
+                       "parseSBVExpr BVNot: size mismatch " ++ show (size, size1)
                    scBvNot sc s1 arg1
-            _ -> fail "parseSBVExpr: wrong number of arguments for Not"
+            _ -> failRuntimeIO "parseSBVExpr: wrong number of arguments for Not"
       SBV.BVEq  -> binrel scBvEq  sbvs
       SBV.BVGeq -> binrel scBvUGe sbvs
       SBV.BVLeq -> binrel scBvULe sbvs
@@ -106,16 +112,18 @@ parseSBVExpr opts sc unint nodes size (SBV.SBVApp operator sbvs) =
                    (size2, arg2) <- parseSBV sc nodes sbv2
                    s1 <- scNat sc size1
                    s2 <- scNat sc size2
-                   unless (size == size1 + size2) (fail $ "parseSBVExpr BVApp: size mismatch " ++ show (size, size1, size2))
+                   unless (size == size1 + size2) $
+                     failRuntimeIO $
+                       "parseSBVExpr BVApp: size mismatch " ++ show (size, size1, size2)
                    b <- scBoolType sc
                    -- SBV append takes the most-significant argument
                    -- first, as SAWCore does.
                    scAppend sc b s1 s2 arg1 arg2
-            _ -> fail "parseSBVExpr: wrong number of arguments for append"
+            _ -> failRuntimeIO "parseSBVExpr: wrong number of arguments for append"
       SBV.BVLkUp indexSize resultSize ->
           do (size1 : inSizes, arg1 : args) <- liftM unzip $ mapM (parseSBV sc nodes) sbvs
-             unless (size1 == fromInteger indexSize && all (== (fromInteger resultSize)) inSizes)
-                        (fail $ "parseSBVExpr BVLkUp: size mismatch")
+             unless (size1 == fromInteger indexSize && all (== (fromInteger resultSize)) inSizes) $
+               failRuntimeIO "parseSBVExpr BVLkUp: size mismatch"
              e <- scBitvector sc (fromInteger resultSize)
              scMultiMux sc (fromInteger indexSize) e arg1 args
       SBV.BVUnint _loc _codegen (name, irtyp) ->
@@ -144,30 +152,35 @@ parseSBVExpr opts sc unint nodes size (SBV.SBVApp operator sbvs) =
       binop scMkOp [sbv1, sbv2] =
           do (size1, arg1) <- parseSBV sc nodes sbv1
              (size2, arg2) <- parseSBV sc nodes sbv2
-             unless (size1 == size && size2 == size) (fail $ "parseSBVExpr binop: size mismatch " ++ show (size, size1, size2))
+             unless (size1 == size && size2 == size) $
+               failRuntimeIO $
+                 "parseSBVExpr binop: size mismatch " ++ show (size, size1, size2)
              s <- scNat sc size
              scMkOp sc s arg1 arg2
-      binop _ _ = fail "parseSBVExpr: wrong number of arguments for binop"
+      binop _ _ = failRuntimeIO "parseSBVExpr: wrong number of arguments for binop"
       -- | scMkRel :: (x :: Nat) -> bitvector x -> bitvector x -> Bool;
       binrel scMkRel [sbv1, sbv2] =
           do (size1, arg1) <- parseSBV sc nodes sbv1
              (size2, arg2) <- parseSBV sc nodes sbv2
-             unless (size == 1 && size1 == size2) (fail $ "parseSBVExpr binrel: size mismatch " ++ show (size, size1, size2))
+             unless (size == 1 && size1 == size2) $
+               failRuntimeIO $
+                 "parseSBVExpr binrel: size mismatch " ++ show (size, size1, size2)
              s <- scNat sc size1
              t <- scMkRel sc s arg1 arg2
              scBoolToBv1 sc t
-      binrel _ _ = fail "parseSBVExpr: wrong number of arguments for binrel"
+      binrel _ _ = failRuntimeIO "parseSBVExpr: wrong number of arguments for binrel"
       -- | scMkOp :: (x :: Nat) -> bitvector x -> Nat -> bitvector x;
       shiftop scMkOp [sbv1, sbv2] =
           do (size1, arg1) <- parseSBV sc nodes sbv1
              (size2, arg2) <- parseSBV sc nodes sbv2
-             unless (size1 == size) (fail "parseSBVExpr shiftop: size mismatch")
+             unless (size1 == size) $
+               failRuntimeIO "parseSBVExpr shiftop: size mismatch"
              s1 <- scNat sc size1
              s2 <- scNat sc size2
              c <- scBool sc False
              boolTy <- scBoolType sc
              scMkOp s1 boolTy s2 c arg1 arg2
-      shiftop _ _ = fail "parseSBVExpr: wrong number of arguments for binop"
+      shiftop _ _ = failRuntimeIO "parseSBVExpr: wrong number of arguments for binop"
       scBvShiftL n ty w c v amt = scGlobalApply sc "Prelude.bvShiftL" [n, ty, w, c, v, amt]
       scBvShiftR n ty w c v amt = scGlobalApply sc "Prelude.bvShiftR" [n, ty, w, c, v, amt]
       scBvRotateL n ty w _ v amt = scGlobalApply sc "Prelude.bvRotateL" [n, ty, w, v, amt]
@@ -285,14 +298,15 @@ splitInputs sc (TRecord fields) x =
 combineOutputs :: SharedContext -> Typ -> [(Nat, Term)] -> IO Term
 combineOutputs sc ty xs0 =
     do (z, ys) <- runStateT (go ty) xs0
-       unless (null ys) (fail $ "combineOutputs: too many outputs: " ++
-                                show (length ys) ++ " remaining")
+       unless (null ys) $
+         failRuntimeIO $ "combineOutputs: too many outputs: " ++
+                         show (length ys) ++ " remaining"
        return z
     where
       pop :: StateT [(Nat, Term)] IO (Nat, Term)
       pop = do xs <- get
                case xs of
-                 [] -> fail "combineOutputs: too few outputs"
+                 [] -> failRuntimeIO "combineOutputs: too few outputs"
                  y : ys -> put ys >> return y
       go :: Typ -> StateT [(Nat, Term)] IO Term
       go TBool =
@@ -310,12 +324,14 @@ combineOutputs sc ty xs0 =
                   | n' == 1 ->
                     do (sizes, xs) <- fmap unzip $ replicateM (fromIntegral n - 1) pop
                        unless (all (== 1) sizes) $
-                         fail $ "combineOutputs: can't read SBV bitvector: " ++
-                                show sizes ++ " doesn't equal " ++ show n
+                         failRuntimeIO $
+                           "combineOutputs: can't read SBV bitvector: " ++
+                           show sizes ++ " doesn't equal " ++ show n
                        -- Append 1-bit words, lsb first (TODO: is this right?)
                        lift $ scAppendAll sc $ reverse [ (t, 1) | t <- x : xs ]
-                  | otherwise -> fail $ "combineOutputs: can't read SBV bitvector from " ++
-                                        show n' ++ " arguments"
+                  | otherwise -> failRuntimeIO $
+                                   "combineOutputs: can't read SBV bitvector from " ++
+                                   show n' ++ " arguments"
       go (TVec n t) =
           do xs <- replicateM (fromIntegral n) (go t)
              ety <- lift (scTyp sc t)
@@ -325,7 +341,7 @@ combineOutputs sc ty xs0 =
              xs <- mapM go ts
              lift (scRecord sc (Map.fromList (zip names xs)))
       go (TFun _ _) =
-          fail "combineOutputs: not a first-order type"
+          failRuntimeIO "combineOutputs: not a first-order type"
 
 ----------------------------------------------------------------------
 
@@ -336,7 +352,8 @@ parseSBVPgm opts sc unint (SBV.SBVPgm (_version, irtype, revcmds, _vcs, _warning
        let (assigns, inputs, outputs) = partitionSBVCommands cmds
        let inSizes = [ size | SBVInput size _ <- inputs ]
        let inNodes = [ node | SBVInput _ node <- inputs ]
-       unless (typSizes inTyp == inSizes) (fail "parseSBVPgm: input size mismatch")
+       unless (typSizes inTyp == inSizes) $
+         failRuntimeIO "parseSBVPgm: input size mismatch"
        inputType <- scTyp sc inTyp
        inputVar <- scLocalVar sc 0
        inputTerms <- splitInputs sc inTyp inputVar

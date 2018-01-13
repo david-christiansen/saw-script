@@ -28,7 +28,6 @@ import Control.Applicative (Applicative)
 #endif
 import Control.Monad.ST
 import qualified Control.Exception as X
-import qualified System.IO.Error as IOError
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (ReaderT(..), ask, asks, local)
 import Control.Monad.State (StateT(..), get, put)
@@ -43,6 +42,7 @@ import qualified Text.PrettyPrint.ANSI.Leijen as PPL
 
 import qualified SAWScript.AST as SS
 import qualified SAWScript.CryptolEnv as CEnv
+import SAWScript.Exceptions
 import qualified SAWScript.JavaMethodSpecIR as JIR
 import qualified SAWScript.LLVMMethodSpecIR as LIR
 import qualified SAWScript.CrucibleMethodSpecIR as CIR
@@ -319,7 +319,8 @@ evaluateTypedTerm sc (TypedTerm schema trm) =
 
 applyValue :: Value -> Value -> TopLevel Value
 applyValue (VLambda f) x = f x
-applyValue _ _ = fail "applyValue"
+applyValue v _ = error $
+                   "Attempted to apply non-lambda" ++ show v ++ " in applyValue"
 
 thenValue :: Value -> Value -> Value
 thenValue v1 v2 = VBind v1 (VLambda (const (return v2)))
@@ -752,12 +753,10 @@ addTrace str val =
 -- | Wrap an action with a handler that catches and rethrows user
 -- errors with an extended message.
 addTraceIO :: String -> IO a -> IO a
-addTraceIO str action = X.catchJust p action h
+addTraceIO str action = action `X.catch` h
   where
-    -- TODO: Use a custom exception type instead of fail/userError
-    -- init/drop 12 is a hack to remove "user error (" and ")"
-    p e = if IOError.isUserError e then Just (init (drop 12 (show e))) else Nothing
-    h msg = X.throwIO (IOError.userError (str ++ ":\n" ++ msg))
+    h :: SAWRuntimeError -> IO a
+    h exn = failRuntimeIO (str ++ ":\n" ++ show exn)
 
 -- | Similar to addTraceIO, but for the TopLevel monad.
 addTraceTopLevel :: String -> TopLevel a -> TopLevel a

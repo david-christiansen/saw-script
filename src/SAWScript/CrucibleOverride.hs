@@ -85,6 +85,7 @@ import           SAWScript.CrucibleMethodSpecIR
 import           SAWScript.CrucibleResolveSetupValue
 import           SAWScript.TypedTerm
 import           SAWScript.Options
+import           SAWScript.Exceptions (failRuntimeIO)
 import           SAWScript.Utils (handleException)
 
 -- | The 'OverrideMatcher' type provides the operations that are needed
@@ -177,7 +178,7 @@ readGlobal ::
 readGlobal k =
   do mb <- OM (uses overrideGlobals (Crucible.lookupGlobal k))
      case mb of
-       Nothing -> fail ("No such global: " ++ show k)
+       Nothing -> failRuntimeIO $ "No such global: " ++ show k
        Just v  -> return v
 
 writeGlobal ::
@@ -224,7 +225,7 @@ methodSpecHandler opts sc cc css retTy = do
           gs css
 
   outputs <- case partitionEithers matches of
-               (e,[]  ) -> fail ("All overrides failed: " ++ show e)
+               (e,[]  ) -> failRuntimeIO $ "All overrides failed: " ++ show e
                (_,s:ss) -> return (s:|ss)
 
   Crucible.writeGlobals =<< liftIO (muxGlobal sym (fmap snd outputs))
@@ -424,7 +425,7 @@ enforceDisjointness cc ss =
      let syms = Map.elems $ Map.intersectionWith (,) (view csAllocs ss) sub
 
      let resolve s = case TyCtx.asMemType s of
-                       Nothing -> fail "enforceDisjointness: not memtype"
+                       Nothing -> failRuntimeIO "enforceDisjointness: not memtype"
                        Just m  -> return m
      mems <- traverse (_1 resolve) syms
 
@@ -714,7 +715,7 @@ valueToSC sym failMsg (Cryptol.TVSeq n cryty) (Crucible.LLVMValArray ty vals)
        liftIO (scVector sc t terms)
 
 valueToSC _ _ _ Crucible.LLVMValReal{} =
-  fail  "valueToSC: Real not supported"
+  failRuntimeIO  "valueToSC: Real not supported"
 
 valueToSC _sym failMsg _tval _val =
   failure failMsg
@@ -725,8 +726,8 @@ typeToSC :: SharedContext -> Crucible.Type -> IO Term
 typeToSC sc t =
   case Crucible.typeF t of
     Crucible.Bitvector sz -> scBitvector sc (fromInteger (Crucible.bytesToBits sz))
-    Crucible.Float -> fail "typeToSC: float not supported"
-    Crucible.Double -> fail "typeToSC: double not supported"
+    Crucible.Float -> failRuntimeIO "typeToSC: float not supported"
+    Crucible.Double -> failRuntimeIO "typeToSC: double not supported"
     Crucible.Array sz ty ->
       do n <- scNat sc (fromIntegral sz)
          ty' <- typeToSC sc ty
@@ -877,7 +878,7 @@ executeAllocation opts cc (var, symTy) =
      let dl = TyCtx.llvmDataLayout ?lc
      memTy <- case TyCtx.asMemType symTy of
                 Just memTy -> return memTy
-                Nothing    -> fail "executAllocation: failed to resolve type"
+                Nothing    -> failRuntimeIO "executAllocation: failed to resolve type"
      liftIO $ printOutLn opts Debug $ unwords ["executeAllocation:", show var, show memTy]
      let memVar = Crucible.llvmMemVar $ (cc^.ccLLVMContext)
      let w = Crucible.memTypeSize dl memTy

@@ -56,6 +56,7 @@ import SAWScript.Options hiding (Verbosity)
 import qualified SAWScript.Options as Opts
 import SAWScript.Utils
 import Verifier.SAW.Prelude
+import SAWScript.Exceptions (failRuntime)
 import SAWScript.LLVMMethodSpecIR
 import SAWScript.LLVMUtils
 import SAWScript.PathVC
@@ -104,7 +105,7 @@ evalLLVMExpr expr ec = eval expr
             TC.Arg n _ _
                 | n < length (ecArgs ec) -> return (ecArgs ec !! n)
                 | otherwise ->
-                    fail $ "evalLLVMExpr: invalid argument index: " ++ show n
+                    failRuntime $ "evalLLVMExpr: invalid argument index: " ++ show n
             TC.Global n tp -> lift $ do
               -- TODO: don't discard fst
               snd <$> (loadGlobal (ecGlobalMap ec) n tp ps)
@@ -120,7 +121,7 @@ evalLLVMExpr expr ec = eval expr
                   -- TODO: don't discard fst
                   snd <$> (lift $ loadPathState addr tp ps)
                 Nothing ->
-                  fail $ "Struct field index " ++ show idx ++ " out of bounds"
+                  failRuntime $ "Struct field index " ++ show idx ++ " out of bounds"
             TC.StructDirectField ve si idx tp -> do
               case siFieldOffset si idx of
                 Just off -> do
@@ -129,8 +130,8 @@ evalLLVMExpr expr ec = eval expr
                   -- TODO: don't discard fst
                   snd <$> (lift $ loadPathState addr tp ps)
                 Nothing ->
-                  fail $ "Struct field index " ++ show idx ++ " out of bounds"
-            TC.ReturnValue _ -> fail "return values not yet supported" -- TODO
+                  failRuntime $ "Struct field index " ++ show idx ++ " out of bounds"
+            TC.ReturnValue _ -> failRuntime "return values not yet supported" -- TODO
         sbe = ecBackend ec
         ps = ecPathState ec
 
@@ -142,12 +143,12 @@ evalLLVMRefExpr :: (Functor m, MonadIO m) =>
 evalLLVMRefExpr expr ec = eval expr
   where eval (CC.Term app) =
           case app of
-            TC.Arg _ _ _ -> fail "evalLLVMRefExpr: applied to argument"
+            TC.Arg _ _ _ -> failRuntime "evalLLVMRefExpr: applied to argument"
             TC.Global n _ -> do
               case Map.lookup n gm of
                 Just addr -> return addr
                 Nothing ->
-                  fail $ "evalLLVMRefExpr: global " ++ show n ++ " not found"
+                  failRuntime $ "evalLLVMRefExpr: global " ++ show n ++ " not found"
             TC.Deref ae _ -> evalLLVMExpr ae ec
             TC.StructField ae si idx _ ->
               case siFieldOffset si idx of
@@ -155,15 +156,15 @@ evalLLVMRefExpr expr ec = eval expr
                   addr <- evalLLVMExpr ae ec
                   liftIO $ addrPlusOffset sbe (ecDataLayout ec) addr off
                 Nothing ->
-                  fail $ "Struct field index " ++ show idx ++ " out of bounds"
+                  failRuntime $ "Struct field index " ++ show idx ++ " out of bounds"
             TC.StructDirectField ve si idx _ -> do
               case siFieldOffset si idx of
                 Just off -> do
                   addr <- evalLLVMRefExpr ve ec
                   liftIO $ addrPlusOffset sbe (ecDataLayout ec) addr off
                 Nothing ->
-                  fail $ "Struct field index " ++ show idx ++ " out of bounds"
-            TC.ReturnValue _ -> fail "evalLLVMRefExpr: applied to return value"
+                  failRuntime $ "Struct field index " ++ show idx ++ " out of bounds"
+            TC.ReturnValue _ -> failRuntime "evalLLVMRefExpr: applied to return value"
         sbe = ecBackend ec
         gm = ecGlobalMap ec
 
@@ -380,7 +381,7 @@ execOverride :: (MonadIO m, Functor m)
              -> [LLVMMethodSpecIR]
              -> [(MemType, SpecLLVMValue)]
              -> Simulator SpecBackend m (Maybe Term)
-execOverride _ _ _ [] _ = fail "Empty list of overrides passed to execOverride."
+execOverride _ _ _ [] _ = failRuntime "Empty list of overrides passed to execOverride."
 execOverride vpopts sc _pos irs@(ir:_) args = do
   initPS <- fromMaybe (error "no path during override") <$> getPath
   let bsl = map specBehavior irs
@@ -411,11 +412,11 @@ execOverride vpopts sc _pos irs@(ir:_) args = do
       return mval
     -- No successful results. Are there any unsuccessful ones?
     [] -> case [ err | (_, _, Left err) <- res ] of
-            [] -> fail $ show $ hcat
+            [] -> failRuntime $ show $ hcat
                   [ text "Zero paths returned from override execution for"
                   , specName ir
                   ]
-            (el:_) -> fail $ show $ vcat
+            (el:_) -> failRuntime $ show $ vcat
                       [ hcat [ text "Unsatisified assertions in "
                              , specName ir
                              , char ':'
@@ -431,7 +432,7 @@ overrideFromSpec :: (MonadIO m, Functor m) =>
                  -> [LLVMMethodSpecIR]
                  -> Simulator SpecBackend m ()
 overrideFromSpec _ _ _ [] =
-  fail "Called overrideFromSpec with empty list."
+  failRuntime "Called overrideFromSpec with empty list."
 overrideFromSpec vpopts sc pos irs@(ir:_) = do
   let ovd = Override (\_ _ -> execOverride vpopts sc pos irs)
   -- TODO: check argument types?
@@ -450,7 +451,7 @@ createLogicValue _ _ sc _ ps (PtrType _) (Just le) = do
   v <- useLogicExprPS sc ps Nothing [] le -- TODO: mrv, args?
   return (v, ps)
 createLogicValue _ _ _ _ _ (StructType _) (Just _) =
-  fail "Struct variables cannot be given initial values as a whole."
+  failRuntime "Struct variables cannot be given initial values as a whole."
 createLogicValue cb sbe sc _expr ps (PtrType (MemType mtp)) Nothing = liftIO $ do
   let dl = cbDataLayout cb
       sz = memTypeSize dl mtp
@@ -459,19 +460,19 @@ createLogicValue cb sbe sc _expr ps (PtrType (MemType mtp)) Nothing = liftIO $ d
   szTm <- scBvConst sc (fromIntegral w) (fromIntegral sz)
   rslt <- sbeRunIO sbe (heapAlloc sbe m mtp w szTm 0)
   case rslt of
-    AError msg -> fail msg
+    AError msg -> failRuntime msg
     AResult c addr m' -> do
       ps' <- addAssertion sbe c (ps & pathMem .~ m')
       return (addr, ps')
 createLogicValue _ _ _ _ _ (PtrType ty) Nothing =
-  fail $ "Pointer to weird type: " ++ show (ppSymType ty)
+  failRuntime $ "Pointer to weird type: " ++ show (ppSymType ty)
 createLogicValue cb _ sc expr ps mtp mrhs = do
   mbltp <- liftIO $ TC.logicTypeOfActual (cbDataLayout cb) sc mtp
   -- Get value of rhs.
   tm <- case (mrhs, mbltp) of
           (Just v, _) -> useLogicExprPS sc ps Nothing [] v -- TODO: mrv, args?
           (Nothing, Just tp) -> liftIO $ scFreshGlobal sc (show (TC.ppLLVMExpr expr)) tp
-          (Nothing, Nothing) -> fail "Can't calculate type for fresh input."
+          (Nothing, Nothing) -> failRuntime "Can't calculate type for fresh input."
   return (tm, ps)
 
 initializeVerification' :: (MonadIO m, Monad m, Functor m) =>
@@ -503,7 +504,7 @@ initializeVerification' sc file ir = do
 
   fnDef <- case lookupDefine fn (specCodebase ir) of
              Just def -> return def
-             Nothing -> fail $ missingSymMsg file (specFunction ir)
+             Nothing -> failRuntime $ missingSymMsg file (specFunction ir)
   sbe <- gets symBE
   -- Create argument list. For pointers, allocate enough space to
   -- store the pointed-to value. For scalar and array types,
@@ -610,7 +611,7 @@ checkFinalState sc ms initPS otherPtrs args = do
   msrv <- case [ e | Return e <- cmds ] of
             [e] -> Just <$> readLLVMMixedExprPS sc initPS Nothing argVals e
             [] -> return Nothing
-            _  -> fail "more than one return value specified (multiple 'llvm_return's ?)"
+            _  -> failRuntime "more than one return value specified (multiple 'llvm_return's ?)"
   expectedValues <- forM [ (post, le, me) | Ensure post _ le me <- cmds ] $ \(post, le, me) -> do
     lhs <- readLLVMTermAddrPS (if post then finPS else initPS) mrv argVals le
     rhs <- readLLVMMixedExprPS sc initPS mrv argVals me
@@ -626,16 +627,16 @@ checkFinalState sc ms initPS otherPtrs args = do
       allocReturn = not (null [ () | Allocate (CC.Term (TC.ReturnValue _)) _ <- cmds ])
   flip execStateT initState $ do
     case (mrv, msrv, [ () | ReturnArbitrary _ <- cmds ]) of
-      (_, _, _ : _ : _) -> fail "More than one `llvm_return_arbitrary` statement."
+      (_, _, _ : _ : _) -> failRuntime "More than one `llvm_return_arbitrary` statement."
       (Nothing, Nothing, []) -> return ()
       (Just rv, Just srv, []) -> pvcgAssertEq "return value" rv srv
-      (Just _, Just _, [_]) -> fail "Both `llvm_return` and `llvm_return_arbitrary` specified."
+      (Just _, Just _, [_]) -> failRuntime "Both `llvm_return` and `llvm_return_arbitrary` specified."
       (Just _, Nothing, [_]) -> return () -- Arbitrary return value
       (Just _, Nothing, []) ->
         unless allocReturn $
-          fail "simulator returned value when not expected (add an 'llvm_return' statement?)"
-      (Nothing, Just _, _) -> fail "simulator did not return value when return value expected (remove an 'llvm_return' statement?)"
-      (Nothing, _, [_]) -> fail "simulator did not return value when return value expected (remove an 'llvm_return' statement?)"
+          failRuntime "simulator returned value when not expected (add an 'llvm_return' statement?)"
+      (Nothing, Just _, _) -> failRuntime "simulator did not return value when return value expected (remove an 'llvm_return' statement?)"
+      (Nothing, _, [_]) -> failRuntime "simulator did not return value when return value expected (remove an 'llvm_return' statement?)"
 
     forM_ allocAssertions $ pvcgAssert "allocation assertion"
     -- Check that expected state modifications have occurred.

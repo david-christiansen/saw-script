@@ -59,6 +59,7 @@ import Language.JVM.Common (ppFldId)
 import qualified SAWScript.CongruenceClosure as CC
 import SAWScript.JavaExpr as TC
 import SAWScript.Options hiding (Verbosity)
+import SAWScript.Exceptions
 import qualified SAWScript.Options as Opts
 import SAWScript.Utils
 import SAWScript.JavaMethodSpecIR
@@ -271,7 +272,7 @@ ocStep (ReturnValue expr) = do
     Just rty ->
       ocEval (evalMixedExpr rty expr) $ \val ->
         ocSetReturnValue (Just val)
-    Nothing -> fail "Return type specification given for method of type void."
+    Nothing -> failRuntimeIO "Return type specification given for method of type void."
 
 -- Executing overrides {{{2
 
@@ -385,7 +386,7 @@ execOverride sc pos ir mbThis args = do
     [(_, _, Left el)] -> do
       let msg = "Unsatisified assertions in " ++ specName ir ++ ":\n"
                 ++ intercalate "\n" (map ppOverrideError el)
-      fail msg
+      failRuntimeIO msg
     [(ps, _, Right mval)] ->
       modifyPathM_ (PP.text "path result") $ \_ ->
         return $
@@ -401,8 +402,8 @@ execOverride sc pos ir mbThis args = do
           -- If the current path stack is non-empty and the override
           -- returned no value, leave the state alone.
           (Nothing,  _:_)    -> ps
-    [] -> fail "Zero paths returned from override execution."
-    _  -> fail "More than one path returned from override execution."
+    [] -> failRuntimeIO "Zero paths returned from override execution."
+    _  -> failRuntimeIO "More than one path returned from override execution."
 
 -- | Add a method override for the given method to the simulator.
 overrideFromSpec :: MonadSim SharedContext m =>
@@ -509,7 +510,7 @@ initializeVerification' sc ir bs refConfig = do
   exprRefs <- mapM (genRef . jssTypeOfActual . snd) refConfig'
   let refAssignments = (exprRefs `zip` map fst refConfig')
       pushFrame cs = case mcs' of
-                       Nothing -> fail "internal: failed to push call frame"
+                       Nothing -> failRuntimeIO "internal: failed to push call frame"
                        Just cs' -> return cs'
         where
           mcs' = pushCallFrame
@@ -558,13 +559,13 @@ resolveClassRHS sc e tp [] = do
     (Just lty, _) -> do
        liftIO $ (scFreshGlobal sc (jeVarName e) lty >>= mkTypedTerm sc)
     (Nothing, _) ->
-      fail $ "Can't convert Java type to logic type: " ++
+      failRuntimeIO $ "Can't convert Java type to logic type: " ++
              show (TC.ppActualType tp)
 resolveClassRHS sc _ _ [r] = do
   t <- evalLogicExpr' sc r
   liftIO $ mkTypedTerm sc t
 resolveClassRHS _ _ _ _ =
-  fail "Not yet implemented."
+  failRuntimeIO "Not yet implemented."
 
 setClassValues :: (MonadSim SharedContext m) =>
                   SharedContext
@@ -615,9 +616,9 @@ valueEqValue _ name ps (RValue r) ps' (RValue r') = do
   case (ma, ma') of
     (Just (len, t), Just (len', t'))
       | len == len' -> pvcgAssertEq name t t'
-      | otherwise -> fail $ "valueEqValue: array sizes don't match: " ++ show (len, len')
-    _ -> fail $ "valueEqValue: " ++ name ++ ": ref does not point to array"
-valueEqValue _ name _ v _ v' = fail $ "valueEqValue: " ++ name ++ ": unspported value type: " ++ show v ++ ", " ++ show v'
+      | otherwise -> failRuntimeIO $ "valueEqValue: array sizes don't match: " ++ show (len, len')
+    _ -> failRuntimeIO $ "valueEqValue: " ++ name ++ ": ref does not point to array"
+valueEqValue _ name _ v _ v' = failRuntimeIO $ "valueEqValue: " ++ name ++ ": unspported value type: " ++ show v ++ ", " ++ show v'
 
 readJavaValueVerif :: (Functor m, Monad m) =>
                       VerificationState
@@ -638,8 +639,8 @@ checkStep vs ps (ReturnValue expr) = do
   t <- liftIO $ mixedExprToTerm (vsContext vs) (vsInitialState vs) expr
   case (ps ^. pathRetVal, mrty) of
     (Just rv, Just rty) -> valueEqTerm (vsContext vs) "return" ps rty rv t
-    (Nothing, _) -> fail "Return specification provided, but method did not return a value."
-    (_, Nothing) -> fail "Return specification provided, but method has void type."
+    (Nothing, _) -> failRuntimeIO "Return specification provided, but method did not return a value."
+    (_, Nothing) -> failRuntimeIO "Return specification provided, but method has void type."
 checkStep vs ps (EnsureInstanceField _pos refExpr f rhsExpr) = do
   rv <- readJavaValueVerif vs ps refExpr
   case rv of
@@ -649,14 +650,14 @@ checkStep vs ps (EnsureInstanceField _pos refExpr f rhsExpr) = do
         Just fv -> do
           ft <- liftIO $ mixedExprToTerm (vsContext vs) (vsInitialState vs) rhsExpr
           valueEqTerm (vsContext vs) (ppJavaExpr refExpr ++ "." ++ fieldIdName f) ps (fieldIdType f) fv ft
-        Nothing  -> fail "Invalid instance field in java_ensure_eq."
-    _ -> fail "Left-hand side of . did not evaluate to a reference."
+        Nothing  -> failRuntimeIO "Invalid instance field in java_ensure_eq."
+    _ -> failRuntimeIO "Left-hand side of . did not evaluate to a reference."
 checkStep vs ps (EnsureStaticField _pos f rhsExpr) = do
   let mfv = getStaticFieldValuePS ps f
   ft <- liftIO $ mixedExprToTerm (vsContext vs) (vsInitialState vs) rhsExpr
   case mfv of
     Just fv -> valueEqTerm (vsContext vs) (ppFldId f) ps (fieldIdType f) fv ft
-    Nothing -> fail "Invalid static field in java_ensure_eq."
+    Nothing -> failRuntimeIO "Invalid static field in java_ensure_eq."
 checkStep _vs _ps (ModifyInstanceField _refExpr _f) = return ()
 checkStep _vs _ps (ModifyStaticField _f) = return ()
 checkStep vs ps (EnsureArray _pos refExpr rhsExpr) = do
@@ -665,7 +666,7 @@ checkStep vs ps (EnsureArray _pos refExpr rhsExpr) = do
   case rv of
     RValue (Ref _ ty) ->
       valueEqTerm (vsContext vs) (ppJavaExpr refExpr) ps ty rv t
-    _ -> fail "Non-reference value in EnsureArray"
+    _ -> failRuntimeIO "Non-reference value in EnsureArray"
 checkStep _vs _ps (ModifyArray _refExpr _aty) = return ()
 
 data VerificationState = VerificationState
@@ -694,7 +695,7 @@ checkFinalState sc ms bs cl initPS = do
       rv <- readJavaValue initLocals finalPS e
       case rv of
         RValue r -> return (r, e)
-        _ -> fail "internal: refMap"
+        _ -> failRuntimeIO "internal: refMap"
   let refMap = Map.fromList refList
   assumptions <- liftIO $ evalAssumptions sc initPS (specAssumptions ms)
   let initState  =
@@ -719,19 +720,19 @@ checkFinalState sc ms bs cl initPS = do
       rv <- readJavaValue initLocals finalPS e
       case rv of
         RValue r -> return (r, fid)
-        _ -> fail "internal: mentionedIFields"
+        _ -> failRuntimeIO "internal: mentionedIFields"
   mentionedArrays <- forM mentionedArrayExprs $ \e -> do
       -- TODO: best combination of initLocals and finalPS unclear here.
       rv <- readJavaValue initLocals finalPS e
       case rv of
         RValue r -> return r
-        _ -> fail "internal: mentionedArrays"
+        _ -> failRuntimeIO "internal: mentionedArrays"
   let mentionedIFieldSet = Set.fromList mentionedIFields
   let mentionedArraySet = Set.fromList mentionedArrays
   let mcf = currentCallFrame initPS
   args <- case mcf of
             Just cf -> return (Map.elems (cf ^. cfLocals))
-            Nothing -> fail "internal: no call frame in initial path state"
+            Nothing -> failRuntimeIO "internal: no call frame in initial path state"
   let reachable = reachableRefs finalPS (maybeToList maybeRetVal ++ args)
   flip execStateT initState $ do
     mapM_ (checkStep st finalPS) cmds

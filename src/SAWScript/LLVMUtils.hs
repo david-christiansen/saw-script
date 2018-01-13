@@ -24,6 +24,7 @@ import Verifier.LLVM.Codebase.LLVMContext
 import Verifier.LLVM.Simulator
 import Verifier.LLVM.Simulator.Internals
 import Verifier.SAW.SharedTerm
+import SAWScript.Exceptions
 import qualified SAWScript.CongruenceClosure as CC
 import SAWScript.LLVMExpr
 
@@ -72,7 +73,7 @@ structFieldAddr :: (Functor m, MonadIO m) =>
 structFieldAddr si idx base =
   case siFieldOffset si idx of
     Just off -> addrPlusOffsetSim base off
-    Nothing -> fail $ "Struct field index " ++ show idx ++ " out of bounds"
+    Nothing -> failRuntime $ "Struct field index " ++ show idx ++ " out of bounds"
 
 storePathState :: (MonadIO m, Functor m) =>
                   Term
@@ -124,7 +125,7 @@ loadGlobal :: (MonadIO m, Functor m) =>
 loadGlobal gm sym tp ps = do
   case Map.lookup sym gm of
     Just addr -> loadPathState addr tp ps
-    Nothing -> fail $ "Global " ++ show sym ++ " not found"
+    Nothing -> failRuntime $ "Global " ++ show sym ++ " not found"
 
 storeGlobal :: (MonadIO m, Functor m) =>
                GlobalMap SpecBackend
@@ -136,7 +137,7 @@ storeGlobal :: (MonadIO m, Functor m) =>
 storeGlobal gm sym tp v ps = do
   case Map.lookup sym gm of
     Just addr -> storePathState addr tp v ps
-    Nothing -> fail $ "Global " ++ show sym ++ " not found"
+    Nothing -> failRuntime $ "Global " ++ show sym ++ " not found"
 
 -- | Add assertion for predicate to path state.
 addAssertion :: SBE SpecBackend -> Term -> SpecPathState -> IO SpecPathState
@@ -164,14 +165,14 @@ readLLVMTermAddrPS :: (Functor m, Monad m, MonadIO m) =>
                    -> Simulator SpecBackend m SpecLLVMValue
 readLLVMTermAddrPS ps mrv args (CC.Term e) =
   case e of
-    Arg _ _ _ -> fail "Can't read address of argument"
+    Arg _ _ _ -> failRuntime "Can't read address of argument"
     Global s _ -> evalExprInCC "readLLVMTerm:Global" (SValSymbol s)
     Deref ae _ -> readLLVMTermPS ps mrv args ae 1
     StructField ae si idx _ ->
       structFieldAddr si idx =<< readLLVMTermPS ps mrv args ae 1
     StructDirectField ve si idx _ ->
       structFieldAddr si idx =<< readLLVMTermAddrPS ps mrv args ve
-    ReturnValue _ -> fail "Can't read address of return value"
+    ReturnValue _ -> failRuntime "Can't read address of return value"
 
 readLLVMTermPS :: (Functor m, Monad m, MonadIO m) =>
                   SpecPathState
@@ -188,7 +189,7 @@ readLLVMTermPS ps mrv args et@(CC.Term e) cnt =
       case (mrv, rslt) of
         (Just v, _) -> return v
         (_, Just v) -> return v
-        (Nothing, Nothing) -> fail "Program did not return a value"
+        (Nothing, Nothing) -> failRuntime "Program did not return a value"
     _ -> do
       let ty = lssTypeOfLLVMExpr et
       addr <- readLLVMTermAddrPS ps mrv args et
@@ -235,7 +236,7 @@ freshLLVMArg (_, ty@(IntType bw)) = do
   sbe <- gets symBE
   tm <- liftSBE $ freshInt sbe bw
   return (ty, tm)
-freshLLVMArg (_, _) = fail "Only integer arguments are supported for now."
+freshLLVMArg (_, _) = failRuntime "Only integer arguments are supported for now."
 
 llvmNullPtr :: (SBETerm m ~ Term) =>
                SBE m
@@ -264,4 +265,4 @@ addrBounds sc sbe dl addrTm sty@(MemType (PtrType (MemType mty))) = do
     maxTerm <- scBvULt sc awTerm addrTm maxPtr
     return (minTerm, maxTerm)
 addrBounds _ _ _ _ ty =
-    fail $ "Invalid type passed to addrBounds: " ++ show (ppSymType ty)
+    failRuntime $ "Invalid type passed to addrBounds: " ++ show (ppSymType ty)

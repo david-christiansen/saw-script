@@ -58,6 +58,7 @@ import Verifier.SAW.SharedTerm
 import qualified SAWScript.CongruenceClosure as CC
 import SAWScript.Builtins
 import SAWScript.CryptolEnv (schemaNoUser)
+import SAWScript.Exceptions
 import SAWScript.LLVMExpr
 import SAWScript.LLVMMethodSpecIR
 import SAWScript.LLVMMethodSpec
@@ -81,7 +82,7 @@ type SAWDefine = SymDefine SAWTerm
 llvm_load_module :: FilePath -> TopLevel LLVMModule
 llvm_load_module file =
   io (LLVM.parseBitCodeFromFile file) >>= \case
-    Left err -> fail (LLVM.formatError err)
+    Left err -> failRuntimeIO (LLVM.formatError err)
     Right llvm_mod -> return (LLVMModule file llvm_mod)
 
 -- LLVM verification and model extraction commands
@@ -106,7 +107,7 @@ startSimulator opts sc lopts (LLVMModule file mdl) sym body = do
   (warnings, cb) <- mkCodebase sbe dl mdl
   forM_ warnings $ printOutLn opts Warn . ("WARNING: " ++) . show
   case lookupDefine sym cb of
-    Nothing -> fail $ missingSymMsg file sym
+    Nothing -> failRuntimeIO $ missingSymMsg file sym
     Just md -> runSimulator cb sbe mem (Just lopts) $
                body scLLVM sbe cb dl md
 
@@ -141,9 +142,10 @@ llvm_symexec bic opts lmod fname allocs inputs outputs doSat =
                   liftIO $ printOutLn opts Info $
                     "Allocated address: " ++ show tm
                   return (e, tm, 1)
-                ty -> fail $ "Allocation parameter " ++ s ++
-                             " does not have pointer type. Type is " ++
-                             show (ppActualType ty)
+                ty -> failRuntimeIO $
+                        "Allocation parameter " ++ s ++
+                        " does not have pointer type. Type is " ++
+                        show (ppActualType ty)
             multDefErr i = error $ "Multiple terms given for " ++ ordinal (i + 1) ++
                                    " argument in function " ++ fname
             isArgAssign (e, _, _) = isArgLLVMExpr e
@@ -160,8 +162,9 @@ llvm_symexec bic opts lmod fname allocs inputs outputs doSat =
                   case (Map.lookup i argMap, ty) of
                     (Just v, _) -> return v
                     -- (Nothing, PtrType (MemType dty)) -> (ty,) <$> allocSome 1 dty
-                    _ -> fail $ "No binding for " ++ ordinal (i + 1) ++
-                                " argument in function " ++ fname
+                    _ -> failRuntimeIO $
+                           "No binding for " ++ ordinal (i + 1) ++
+                           " argument in function " ++ fname
         let argVals = map snd args
             retReg = (,Ident "__SAWScript_rslt") <$> sdRetType md
         _ <- callDefine' False sym retReg args
@@ -175,7 +178,7 @@ llvm_symexec bic opts lmod fname allocs inputs outputs doSat =
             "$safety" -> do
               mp <- getPath
               case mp of
-                Nothing -> fail "No final path for safety condition."
+                Nothing -> failRuntimeIO "No final path for safety condition."
                 Just p -> return (p ^. pathAssertions)
             _ -> do
               e <- failLeft $ runExceptT $ parseLLVMExpr lmod cb sym ostr
@@ -210,7 +213,7 @@ llvm_extract bic opts lmod func _setup =
     _ <- callDefine sym (sdRetType md) args
     mrv <- getProgramReturnValue
     case mrv of
-      Nothing -> fail "No return value from simulated function."
+      Nothing -> failRuntimeIO "No return value from simulated function."
       Just rv -> liftIO $ do
         lamTm <- scAbstractExts scLLVM exts rv
         scImport sc lamTm >>= mkTypedTerm sc
@@ -339,8 +342,8 @@ llvm_pure = return ()
 
 type LLVMExprParser a = ParsecT String () IO a
 
-failLeft :: (Monad m, Show s) => m (Either s a) -> m a
-failLeft act = either (fail . show) return =<< act
+failLeft :: (MonadIO m, Show s) => m (Either s a) -> m a
+failLeft act = either (failRuntimeIO . show) return =<< act
 
 checkProtoLLVMExpr ::
   Monad m =>
@@ -423,7 +426,7 @@ checkProtoLLVMExpr cb fnDecl dbgArgNames retinfo margs pe =
 
 
 parseLLVMExpr ::
-  Monad m =>
+  MonadIO m =>
   LLVMModule          {- ^ current module   -} ->
   Codebase SAWBackend {- ^ current codebase -} ->
   Symbol              {- ^ function name    -} ->
@@ -432,7 +435,8 @@ parseLLVMExpr ::
 parseLLVMExpr lmod cb fn str = do
   fnDecl <- case lookupFunctionType fn cb of
               Just fd -> return fd
-              Nothing -> fail $ "Function " ++ show fn ++ " neither declared nor defined."
+              Nothing -> throwE $ "Function " ++ show fn ++
+                                  " neither declared nor defined."
 
   let retInfo:argInfos = fromMaybe [] (DU.computeFunctionTypes (modMod lmod) fn)
                       ++ repeat DU.Unknown
@@ -453,14 +457,15 @@ localVarMap m fn =
     Just def -> DU.localVariableNameDeclarations (DU.mkMdMap m) def
 
 
-getLLVMExpr :: Monad m =>
+getLLVMExpr :: MonadIO m =>
                LLVMMethodSpecIR -> String
             -> m (LLVMExpr, MemType)
 getLLVMExpr ms name = do
   case Map.lookup name (specLLVMExprNames ms) of
     -- TODO: maybe compute type differently?
     Just (_, expr) -> return (expr, lssTypeOfLLVMExpr expr)
-    Nothing -> fail $ "LLVM name " ++ name ++ " has not been declared."
+    Nothing -> failRuntimeIO $
+                 "LLVM name " ++ name ++ " has not been declared."
 
 mkMixedExpr :: LLVMMethodSpecIR
             -> SharedContext
@@ -485,7 +490,7 @@ mkLogicExpr ms sc t = do
 llvm_type :: String -> TopLevel LLVM.Type
 llvm_type str =
   case LLVM.parseType str of
-    Left e -> fail (show e)
+    Left e -> failRuntimeIO (show e)
     Right t -> return t
 
 llvm_int :: Int -> LLVM.Type
@@ -524,9 +529,10 @@ llvm_var bic _ name sty = do
   let ?lc  = cbLLVMContext cb
   lty <- case liftMemType sty of
            Just mty -> return mty
-           Nothing -> fail $ "Unsupported type in llvm_var: " ++ show (LLVM.ppType sty)
+           Nothing -> failRuntimeIO $
+                        "Unsupported type in llvm_var: " ++ show (LLVM.ppType sty)
   expr <- failLeft $ runExceptT $ parseLLVMExpr lmod cb func name
-  when (isPtrLLVMExpr expr) $ fail $
+  when (isPtrLLVMExpr expr) $ failRuntimeIO $
     "Used `llvm_var` for pointer expression `" ++ name ++
     "`. Use `llvm_ptr` instead."
   -- TODO: check compatibility before updating
@@ -537,7 +543,8 @@ llvm_var bic _ name sty = do
   mty <- liftIO $ logicTypeOfActual dl sc lty
   case mty of
     Just ty -> liftIO $ scLLVMValue sc ty name >>= mkTypedTerm sc
-    Nothing -> fail $ "Unsupported type in llvm_var: " ++ show (ppMemType lty)
+    Nothing -> failRuntimeIO $
+                 "Unsupported type in llvm_var: " ++ show (ppMemType lty)
 
 llvm_ptr :: BuiltinContext -> Options -> String -> LLVM.Type
         -> LLVMSetup ()
@@ -550,9 +557,10 @@ llvm_ptr _ _ name sty = do
   let ?lc  = cbLLVMContext cb
   lty <- case liftMemType sty of
            Just mty -> return mty
-           Nothing -> fail $ "Unsupported type in llvm_ptr: " ++ show (LLVM.ppType sty)
+           Nothing -> failRuntimeIO $
+                        "Unsupported type in llvm_ptr: " ++ show (LLVM.ppType sty)
   expr <- failLeft $ runExceptT $ parseLLVMExpr lmod cb func name
-  unless (isPtrLLVMExpr expr) $ fail $
+  unless (isPtrLLVMExpr expr) $ failRuntimeIO $
     "Used `llvm_ptr` for non-pointer expression `" ++ name ++
     "`. Use `llvm_var` instead."
   let pty = PtrType (MemType lty)
@@ -566,10 +574,11 @@ checkCompatibleType :: String -> LLVMActualType -> Cryptol.Schema
 checkCompatibleType msg aty schema = liftIO $ do
   case cryptolTypeOfActual aty of
     Nothing ->
-      fail $ "Type is not translatable: " ++ show (ppMemType aty) ++
-             " (" ++ msg ++ ")"
+      failRuntimeIO $
+        "Type is not translatable: " ++ show (ppMemType aty) ++
+        " (" ++ msg ++ ")"
     Just lt -> do
-      unless (Cryptol.Forall [] [] lt == schemaNoUser schema) $ fail $
+      unless (Cryptol.Forall [] [] lt == schemaNoUser schema) $ failRuntimeIO $
         unlines [ "Incompatible type:"
                 , "  Expected: " ++ Cryptol.pretty lt
                 , "  Got: " ++ Cryptol.pretty schema
@@ -585,7 +594,8 @@ llvm_assert bic _ v = do
   me <- mkMixedExpr ms sc v
   le <- case me of
           LogicE le -> return le
-          _ -> fail "LLVM expressions not allowed on the right hand side of `llvm_assert`"
+          _ -> failRuntimeIO
+                 "LLVM expressions not allowed on the right hand side of `llvm_assert`"
   modify $ \st ->
     st { lsSpec = specAddAssumption le (lsSpec st) }
 
@@ -597,7 +607,7 @@ llvm_assert_eq bic _opts name (TypedTerm schema t) = do
   me <- mkMixedExpr ms sc t
   le <- case me of
           LogicE le -> return le
-          _ -> fail "LLVM expressions not allowed on the right hand side of `llvm_assert_eq`"
+          _ -> failRuntimeIO "LLVM expressions not allowed on the right hand side of `llvm_assert_eq`"
   checkCompatibleType "llvm_assert_eq" mty schema
   modify $ \st ->
     st { lsSpec = specAddLogicAssignment fixPos expr le ms }
@@ -608,7 +618,7 @@ llvm_assert_null _bic _opts name = do
   (expr, mty) <- getLLVMExpr ms name
   enull <- case mty of
              PtrType _ -> liftIO $ llvmNullPtr (specBackend ms) (MemType mty)
-             _ -> fail $ unwords
+             _ -> failRuntimeIO $ unwords
                   [ "llvm_assert_null called with non-pointer expression"
                   , name
                   , "of type"
@@ -649,8 +659,8 @@ llvm_return bic _opts (TypedTerm schema t) = do
       let cmd = Return me
       modify $ \st ->
         st { lsSpec = specAddBehaviorCommand cmd (lsSpec st) }
-    Just Nothing -> fail "llvm_return called on void function"
-    Nothing -> fail "llvm_return called inside non-existant function?"
+    Just Nothing -> failRuntimeIO "llvm_return called on void function"
+    Nothing -> failRuntimeIO "llvm_return called inside non-existant function?"
 
 llvm_return_arbitrary :: LLVMSetup ()
 llvm_return_arbitrary = do
@@ -661,8 +671,8 @@ llvm_return_arbitrary = do
       let cmd = ReturnArbitrary mty
       modify $ \st ->
         st { lsSpec = specAddBehaviorCommand cmd (lsSpec st) }
-    Just Nothing -> fail "llvm_return_arbitrary called on void function"
-    Nothing -> fail "llvm_return_arbitrary called inside non-existant function?"
+    Just Nothing -> failRuntimeIO "llvm_return_arbitrary called on void function"
+    Nothing -> failRuntimeIO "llvm_return_arbitrary called inside non-existant function?"
 
 llvm_verify_tactic :: BuiltinContext -> Options
                  -> ProofScript SV.SatResult

@@ -45,7 +45,7 @@ import System.Process (readProcess)
 import qualified SAWScript.AST as SS
 import SAWScript.AST (Located(..))
 import SAWScript.Builtins
-import SAWScript.Exceptions (failTypecheck)
+import SAWScript.Exceptions (SAWRuntimeError(..), failTypecheck, failRuntimeIO)
 import qualified SAWScript.CryptolEnv as CEnv
 import qualified SAWScript.Import
 import SAWScript.CrucibleBuiltins
@@ -192,7 +192,7 @@ interpret env expr =
                                    return (tupleLookupValue a i)
       SS.Var x               -> do rw <- getMergedEnv env
                                    case Map.lookup x (rwValues rw) of
-                                     Nothing -> fail $ "unknown variable: " ++ SS.getVal x
+                                     Nothing -> failRuntimeIO $ "unknown variable: " ++ SS.getVal x
                                      Just v -> return (addTrace (show x) v)
       SS.Function pat e      -> do let f v = interpret (bindPatternLocal pat Nothing v env) e
                                    return $ VLambda f
@@ -200,14 +200,14 @@ interpret env expr =
                                    v2 <- interpret env e2
                                    case v1 of
                                      VLambda f -> f v2
-                                     _ -> fail $ "interpret Application: " ++ show v1
+                                     _ -> failRuntimeIO $ "interpret Application: " ++ show v1
       SS.Let dg e            -> do env' <- interpretDeclGroup env dg
                                    interpret env' e
       SS.TSig e _            -> interpret env e
       SS.IfThenElse e1 e2 e3 -> do v1 <- interpret env e1
                                    case v1 of
                                      VBool b -> interpret env (if b then e2 else e3)
-                                     _ -> fail $ "interpret IfThenElse: " ++ show v1
+                                     _ -> failRuntimeIO $ "interpret IfThenElse: " ++ show v1
       SS.LExpr _ e           -> interpret env e
 
 interpretDecl :: LocalEnv -> SS.Decl -> TopLevel LocalEnv
@@ -233,7 +233,7 @@ interpretDeclGroup env (SS.Recursive ds) = return env'
 interpretStmts :: LocalEnv -> [SS.Stmt] -> TopLevel Value
 interpretStmts env stmts =
     case stmts of
-      [] -> fail "empty block"
+      [] -> failRuntimeIO "empty block"
       [SS.StmtBind _ (SS.PWild _) _ e] -> interpret env e
       SS.StmtBind _ pat _ e : ss ->
           do v1 <- interpret env e
@@ -249,7 +249,7 @@ interpretStmts env stmts =
              putTopLevelRW $ rw{rwCryptol = ce'}
              interpretStmts env ss
       SS.StmtImport _ _ : _ ->
-          do fail "block import unimplemented"
+          do failRuntimeIO "block import unimplemented"
       SS.StmtTypedef _ name ty : ss ->
           do let env' = LocalTypedef (getVal name) ty : env
              interpretStmts env' ss
@@ -287,7 +287,7 @@ processStmtBind printBinds pat _mc expr = do -- mx mt
             result <- SAWScript.Value.fromValue val
             return (result, t')
           _ -> return (val, t)
-      _ -> fail $ "Not a monomorphic type: " ++ SS.pShow schema
+      _ -> failRuntimeIO $ "Not a monomorphic type: " ++ SS.pShow schema
   --io $ putStrLn $ "Top-level bind: " ++ show mx
   --showCryptolEnv
 
@@ -344,12 +344,22 @@ interpretFile file = do
                                            ("[output] at " ++ show (getPos s) ++ ": ") :
                                              map (\l -> "\t"  ++ l) (lines str)
                          showLoc <- printShowPos <$> getOptions
-                         if showLoc
-                           then localOptions (\o -> o { printOutFn = \lvl str ->
-                                                          printOutFn o lvl (withPos str) })
-                                  (interpretStmt False s)
-                           else interpretStmt False s
-
+                         wrapExn (addPos (getPos s)) $
+                           if showLoc
+                             then localOptions (\o -> o { printOutFn = \lvl str ->
+                                                            printOutFn o lvl (withPos str) })
+                                    (interpretStmt False s)
+                             else interpretStmt False s
+    wrapExn :: X.Exception e => (e -> e) -> TopLevel a -> TopLevel a
+    wrapExn f m =
+      do env <- getTopLevelRO
+         st <- getTopLevelRW
+         (x, st') <- io $ runTopLevel m env st `X.catch` (\e -> X.throw (f e))
+         putTopLevelRW st'
+         return x
+    addPos :: X.Exception e => Pos -> e -> SAWRuntimeError
+    addPos pos e = SAWRuntimeError $ show pos ++ ":\n" ++
+                                     unlines (map (\l -> "\t"  ++ l) (lines (show e)))
 -- | Evaluate the value called 'main' from the current environment.
 interpretMain :: TopLevel ()
 interpretMain = do
@@ -457,7 +467,7 @@ print_value (VTerm t) = do
   cenv <- fmap rwCryptol getTopLevelRW
   let cfg = meSolverConfig (CEnv.eModuleEnv cenv)
   unless (null (getAllExts (ttTerm t))) $
-    fail "term contains symbolic variables"
+    failRuntimeIO "term contains symbolic variables"
   sawopts <- getOptions
   t' <- io $ defaultTypedTerm sawopts sc cfg t
   opts <- fmap rwPPOpts getTopLevelRW
